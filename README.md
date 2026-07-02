@@ -82,6 +82,9 @@ into every executable). Key points, expanded in
   register class. GC descriptors deduplicate by object shape.
 - **Everything panics with a line number**, including stack overflow — a
   prologue guard in non-leaf functions that costs nothing measurable.
+- **Performance** is within 1.2–1.4× of Go on small benchmarks (the upper
+  end is fib paying for checked integer arithmetic); see
+  [bench/](bench/README.md) for numbers and analysis.
 
 ## Testing
 
