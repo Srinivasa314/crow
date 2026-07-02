@@ -57,8 +57,8 @@ and no undefined behavior. The short version:
 - `if` is an expression, and a function body's final bare expression is
   returned: `fn double(x: int): int { x * 2 }`.
 - `nil` is the checked null reference, and every error path — bounds,
-  overflow, division, casts, shifts, even runaway recursion — panics with a
-  source line number.
+  integer overflow, division, casts, shifts, even runaway recursion — panics
+  with a source line number.
 
 **[Read the book](BOOK.md)** for the full guide. `examples/` has runnable
 programs — `features.crow` is a tour of the whole language.
