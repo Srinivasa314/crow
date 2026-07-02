@@ -1,0 +1,22 @@
+// ASCII Mandelbrot set, exercising float arithmetic and string building.
+fn main() {
+    let chars = [" ", ".", ":", "-", "=", "+", "*", "#", "%", "@"];
+    for (let py = 0; py < 24; py = py + 1) {
+        let row = "";
+        for (let px = 0; px < 78; px = px + 1) {
+            let x0 = itof(px) / 78.0 * 3.5 - 2.5;
+            let y0 = itof(py) / 24.0 * 2.0 - 1.0;
+            let x = 0.0;
+            let y = 0.0;
+            let i = 0;
+            while x*x + y*y <= 4.0 && i < 50 {
+                let xt = x*x - y*y + x0;
+                y = 2.0*x*y + y0;
+                x = xt;
+                i = i + 1;
+            }
+            row = row + chars[(i * (len(chars) - 1)) / 50];
+        }
+        println(row);
+    }
+}

@@ -1,0 +1,55 @@
+// A tour of Crow's sized integer types: packed [u8] buffers, u32/u64
+// arithmetic with explicit widening casts, and signed narrow types.
+// Arithmetic overflow and out-of-range casts panic, so wrap-around math
+// is written as: widen to u64, reduce with %, cast back down.
+
+// djb2-style rolling hash reduced mod 2^32.
+fn hash32(data: [u8]): u32 {
+    let h: u64 = 5381;
+    for (let i = 0; i < len(data); i = i + 1) {
+        h = (h * 33 + data[i] as u64) % 4294967296;
+    }
+    return h as u32;
+}
+
+// 32-bit linear congruential generator (Numerical Recipes constants).
+struct Rng { state: u32 }
+
+fn next(r: Rng): u32 {
+    r.state = ((r.state as u64 * 1664525 + 1013904223) % 4294967296) as u32;
+    return r.state;
+}
+
+fn main() {
+    // Fill a packed byte buffer (one byte per element) with pseudo-random data.
+    let rng = Rng { state: 42 };
+    let data: [u8] = [];
+    for (let i = 0; i < 1024; i = i + 1) {
+        push(data, (next(rng) % 256) as u8);
+    }
+    println(len(data));
+    println(hash32(data));
+
+    // Signed narrow types: i8 comfortably holds a year of temperatures.
+    let temps: [i8] = [-12, -3, 0, 7, 19, 25, 31, -8];
+    let lo: i8 = 127;
+    let hi: i8 = -128;
+    let sum = 0;
+    for (let i = 0; i < len(temps); i = i + 1) {
+        let t = temps[i];
+        if t < lo { lo = t; }
+        if t > hi { hi = t; }
+        sum = sum + t as int;
+    }
+    println(lo);
+    println(hi);
+    println(sum / len(temps));
+
+    // u64 reaches where int cannot; comparisons and division are unsigned.
+    let big: u64 = 18446744073709551615;   // u64::MAX
+    println(big);
+    println(big % 1000000007);
+    assert(big > 9223372036854775807);
+    assert((big / 2) as int == 9223372036854775807);
+    println("done");
+}

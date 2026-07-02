@@ -1,0 +1,8 @@
+fn main() {
+    println("hello, world");
+    println(40 + 2);
+    println(3.5 * 2.0);
+    println(true && !false);
+    let name = "crow";
+    println("hi " + name + "!");
+}

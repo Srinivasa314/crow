@@ -1,0 +1,146 @@
+/* A compact tour of every Crow feature. /* Block comments nest. */ Still here. */
+
+struct Point { x: int, y: int }
+struct Node { value: int, next: Node }
+struct Pair<T> { a: T, b: T }
+
+// The final statement of any body may be a bare expression: it is returned.
+fn double(x: int): int { x * 2 }
+fn apply(f: fn(int): int, v: int): int { f(v) }
+fn make_adder(n: int): fn(int): int { fn(x: int): int { x + n } }
+
+// Generics: checked once with T opaque, then monomorphized by shape.
+fn id<T>(x: T): T { x }
+fn first<T>(xs: [T]): T { xs[0] }
+fn empty<T>(): [T] { [] }
+
+fn make_list(n: int): Node {
+    let head: Node = nil;
+    for (let i = 0; i < n; i += 1) {
+        head = Node { value: i, next: head };
+    }
+    head
+}
+
+fn sum_list(list: Node): int {
+    let total = 0;
+    while list != nil {
+        total += list.value;
+        list = list.next;
+    }
+    total
+}
+
+fn main() {
+    // structs, recursion through references, nil
+    println(sum_list(make_list(100)));     // 4950
+    assert(sum_list(nil) == 0);
+
+    // arrays: literals, push/pop/len, indexing, nesting, aliasing
+    let xs = [1, 2, 3];
+    push(xs, 4);
+    assert(pop(xs) == 4 && len(xs) == 3);
+    xs[1] *= 100;                          // compound assignment on elements
+    let alias = xs;                        // arrays are references:
+    for (let i = 0; i < 100; i += 1) { push(alias, i); }
+    assert(len(xs) == 103);                // aliases survive reallocation
+    let grid = [[1, 2], [3, 4]];
+    println(grid[1][0] + xs[1]);           // 203
+
+    // control flow: parenless conditions, break/continue, optional for clauses
+    let c = 0;
+    for (let i = 0; i < 100; i += 1) {
+        if i % 2 == 0 { continue; }
+        if i > 50 { break; }
+        c += i;
+    }
+    for (;;) { break; }
+    println(c);                            // 625
+
+    // if is also an expression (else required, only the taken branch runs)
+    let temp = 72;
+    println(if temp > 80 { "hot" } else if temp > 60 { "mild" } else { "cold" });
+
+    // closures capture by value at creation...
+    let add5 = make_adder(5);
+    assert(add5(10) == 15 && apply(double, 21) == 42);  // fns are values
+    assert(double == double);              // ...with stable identity
+    let funcs: [fn(int): int] = [];
+    for (let i = 0; i < 3; i += 1) {
+        let k = i * 10;
+        push(funcs, fn(x: int): int { x + k });
+    }
+    // ...but a captured reference still aims at the shared object:
+    let counter = Point { x: 0, y: 0 };
+    let bump = fn() { counter.x += 1; };
+    bump();
+    bump();
+    println(funcs[0](1) + funcs[1](1) + funcs[2](1) + counter.x);   // 35
+
+    // reference semantics: assignment aliases; == is identity for references
+    // and content for strings
+    let p1 = Point { x: 1, y: 2 };
+    let p2 = p1;
+    p2.x = 99;
+    assert(p1.x == 99 && p1 == p2);
+    assert(p1 != Point { x: 99, y: 2 });
+    assert("cr" + "ow" == "crow");
+
+    // strings: immutable, concat, multiline literals, unicode escapes
+    let s = "a";
+    for (let i = 0; i < 5; i += 1) { s += s; }
+    println(len(s));                       // 32
+    println("strings span
+lines, and \u{2192} escapes \u{1F600}");
+
+    // byte literals and byte indexing: s[i] is the i-th byte, a u8
+    let word = "crow";
+    assert(word[0] == b'c' && (word[2] - b'a') as int == 14);
+    assert(len("é") == 2);                 // strings are UTF-8: byte length
+    let bs = stob(word);                   // string <-> bytes copies, so
+    bs[0] -= 32;                           // the string stays untouched
+    println(btos(bs) + word);              // Crowcrow (btos checks UTF-8)
+
+    // number <-> string conversions (stoi/stof are strict: bad input panics)
+    println(itos(stoi("-42") + 42) + "/" + ftos(stof("2.5") * itof(4)));
+    assert(ftoi(9.9) == 9);                // float -> int truncates, checked
+
+    // sized integers: no implicit mixing, literals adopt the context type
+    let byte: u8 = 200;
+    assert(byte + 55 == 255);              // u8 arithmetic (overflow panics)
+    println(byte as int + 100);            // 300: widen explicitly
+    let big: u64 = 18446744073709551615;
+    println(big % 1000000007);             // unsigned all the way to u64::MAX
+    let tiny: i8 = -128;
+    assert(tiny as i16 - 1 == -129 && 3.99 as int == 3);
+    let packed: [u8] = [1, 2, 3];          // packed: one byte per element
+    push(packed, 255);
+    assert(packed[3] == 255);
+
+    // bitwise and shifts bind tighter than comparison: 6 & 1 == 0 just works
+    assert(6 & 1 == 0 && (6 & 3 | 8 ^ 1) == 11);
+    assert(-16 >> 2 == -4);                // >> is arithmetic on signed types
+    let flags: u8 = 0;
+    flags |= 1 << 3;                       // compound ops: += -= ... |= <<=
+    flags ^= 255;
+    println(~flags);                       // 8: ~ stays in the operand's width
+
+    // bools, short-circuit, shadowing
+    let maybe: Node = nil;
+    assert(maybe == nil || maybe.value >= 0);   // rhs never evaluated
+    let shadow = 1;
+    { let shadow = shadow + 1; assert(shadow == 2); }
+    assert(shadow == 1);
+
+    // generics in action: T inferred from arguments or the expected type
+    assert(id(42) == 42 && id("generic") == "generic");
+    let pr = Pair { a: 1, b: 2 };
+    let names: [string] = empty();
+    push(names, "crow");
+    println(itos(pr.a * 10 + pr.b) + first(names));   // 12crow
+
+    // the GC can be forced; everything above survives relocation
+    gc_collect();
+    print("done");                         // print = println minus the newline
+    println("");
+}

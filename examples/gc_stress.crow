@@ -1,0 +1,72 @@
+struct Node { value: int, next: Node }
+struct Tree { left: Tree, right: Tree, key: int }
+
+fn build_list(n: int): Node {
+    let head: Node = nil;
+    for (let i = 0; i < n; i = i + 1) {
+        head = Node { value: i, next: head };
+    }
+    return head;
+}
+
+fn checksum(list: Node): int {
+    let total = 0;
+    let cur = list;
+    while cur != nil {
+        total = total + cur.value;
+        cur = cur.next;
+    }
+    return total;
+}
+
+fn build_tree(depth: int, key: int): Tree {
+    if depth == 0 { return nil; }
+    return Tree {
+        left: build_tree(depth - 1, key * 2),
+        right: build_tree(depth - 1, key * 2 + 1),
+        key: key,
+    };
+}
+
+fn tree_sum(t: Tree): int {
+    if t == nil { return 0; }
+    return t.key + tree_sum(t.left) + tree_sum(t.right);
+}
+
+fn main() {
+    // Lots of short-lived garbage with a long-lived survivor list:
+    // exercises minor GCs, promotion, and the write barrier.
+    let survivor = build_list(1000);
+    for (let i = 0; i < 2000; i = i + 1) {
+        let garbage = build_list(100);
+        assert(checksum(garbage) == 4950);
+        // mutate old-gen objects to point at young objects (write barrier)
+        survivor.next = Node { value: i, next: survivor.next };
+    }
+    println(checksum(survivor) > 0);
+
+    // Long-lived trees to force major collections.
+    let keep: [Tree] = [];
+    for (let round = 0; round < 50; round = round + 1) {
+        push(keep, build_tree(10, 1));
+        let throwaway = build_tree(12, 1);
+        assert(tree_sum(throwaway) > 0);
+    }
+    let expected = tree_sum(keep[0]);
+    for (let i = 0; i < len(keep); i = i + 1) {
+        assert(tree_sum(keep[i]) == expected);
+    }
+    println(expected);
+
+    // Strings churn through the nursery too.
+    let words: [string] = [];
+    for (let i = 0; i < 5000; i = i + 1) {
+        push(words, itos(i));
+    }
+    assert(words[4999] == "4999");
+    println(len(words));
+
+    gc_collect();
+    println(checksum(survivor) > 0);
+    println("gc stress passed");
+}

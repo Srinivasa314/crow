@@ -1,0 +1,21 @@
+[package]
+name = "crowc"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "crowc"
+path = "src/main.rs"
+
+[dependencies]
+# 0.132 is a hard minimum: earlier versions (<= 0.131) have a bug in the
+# user-stack-map safepoint pass where uses of marked values through SSA
+# aliases are not rewritten into spill-slot reloads (fixed upstream by the
+# `rewrite_uses_of_alias_values` change), which corrupts GC roots in
+# --gc-roots=stackmap mode.
+cranelift-codegen = "0.132"
+cranelift-frontend = "0.132"
+cranelift-module = "0.132"
+cranelift-object = "0.132"
+cranelift-native = "0.132"
+target-lexicon = "0.13.3"

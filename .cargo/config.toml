@@ -1,0 +1,4 @@
+# The stack-map GC root mode walks the native stack via the frame-pointer
+# chain, which must stay intact through the Rust runtime's own frames.
+[build]
+rustflags = ["-Cforce-frame-pointers=yes"]
