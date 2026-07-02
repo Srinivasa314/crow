@@ -1,5 +1,7 @@
 # Crow
 
+[![CI](https://github.com/Srinivasa314/crow/actions/workflows/ci.yml/badge.svg)](https://github.com/Srinivasa314/crow/actions/workflows/ci.yml)
+
 A small, **Rust-flavored** programming language, compiled ahead of time to
 native code with [Cranelift](https://cranelift.dev/) and running on a **precise generational garbage collector**. It supports Linux and macOS, x86-64 and ARM64.
 
