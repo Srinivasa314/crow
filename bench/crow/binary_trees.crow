@@ -1,0 +1,26 @@
+struct Tree { left: Tree, right: Tree, value: int }
+
+fn build(depth: int, value: int): Tree {
+    if depth == 0 {
+        return Tree { left: nil, right: nil, value: value };
+    }
+    Tree {
+        left: build(depth - 1, value * 2),
+        right: build(depth - 1, value * 2 + 1),
+        value: value,
+    }
+}
+
+fn sum(t: Tree): int {
+    if t == nil { return 0; }
+    t.value + sum(t.left) + sum(t.right)
+}
+
+fn main() {
+    let total = 0;
+    for (let i = 0; i < 160; i += 1) {
+        total += sum(build(14, i + 1));
+    }
+    println(total);
+}
+

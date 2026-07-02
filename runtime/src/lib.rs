@@ -231,7 +231,10 @@ fn gc() -> &'static mut Gc {
     unsafe { &mut *GC.0.get() }
 }
 
-const DEFAULT_NURSERY_KB: usize = 512;
+// 8 MiB keeps allocation-heavy workloads with megabyte-scale live sets
+// (e.g. tree building) inside the nursery; at 512 KiB such programs promoted
+// nearly everything on every minor GC. Tune with CROW_NURSERY_KB.
+const DEFAULT_NURSERY_KB: usize = 8 * 1024;
 const DEFAULT_MAJOR_MB: usize = 8;
 
 /// The current frame pointer. `inline(never)` plus forced frame pointers

@@ -73,7 +73,7 @@ named functions and using a function name as a value allocates nothing.
 
 Precise, generational, two generations:
 
-- **Nursery** (512 KiB by default): contiguous bump allocation. A **minor GC**
+- **Nursery** (8 MiB by default; `CROW_NURSERY_KB` overrides): contiguous bump allocation. A **minor GC**
   evacuates live objects into the old generation Cheney-style and resets the
   bump pointer. Objects that survive one minor collection are promoted.
 - **Old generation**: individually allocated blocks, collected by

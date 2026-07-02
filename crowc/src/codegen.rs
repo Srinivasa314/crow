@@ -1717,13 +1717,29 @@ impl FnCompiler<'_, '_> {
         }
         let k = ty.int_kind().expect("checker restricted arithmetic to numeric types");
         match op {
+            // Full-width checked arithmetic reads the hardware overflow flag
+            // (adds + b.vs on arm64, add + jo on x64) instead of recomputing
+            // it with sign tricks — ~6 fewer instructions per operation.
+            BinOp::Add | BinOp::Sub | BinOp::Mul if k.bits() == 64 => {
+                let (r, of) = match (op, k.signed()) {
+                    (BinOp::Add, true) => self.b.ins().sadd_overflow(lv, rv),
+                    (BinOp::Add, false) => self.b.ins().uadd_overflow(lv, rv),
+                    (BinOp::Sub, true) => self.b.ins().ssub_overflow(lv, rv),
+                    (BinOp::Sub, false) => self.b.ins().usub_overflow(lv, rv),
+                    (BinOp::Mul, true) => self.b.ins().smul_overflow(lv, rv),
+                    (BinOp::Mul, false) => self.b.ins().umul_overflow(lv, rv),
+                    _ => unreachable!(),
+                };
+                self.panic_if(of, Rt::PanicOverflow, line);
+                r
+            }
             BinOp::Add | BinOp::Sub | BinOp::Mul => {
                 let r = match op {
                     BinOp::Add => self.b.ins().iadd(lv, rv),
                     BinOp::Sub => self.b.ins().isub(lv, rv),
                     _ => self.b.ins().imul(lv, rv),
                 };
-                self.check_overflow(op, k, lv, rv, r, line);
+                self.check_overflow(k, r, line);
                 r
             }
             BinOp::Div | BinOp::Rem => self.gen_div(op, k, lv, rv, line),
@@ -1763,50 +1779,14 @@ impl FnCompiler<'_, '_> {
         }
     }
 
-    /// Panic if the add/sub/mul result overflowed the integer kind. Operands
-    /// and result are in canonical 64-bit form.
-    fn check_overflow(&mut self, op: BinOp, k: IntKind, lv: Value, rv: Value, r: Value, line: u32) {
-        let overflow = if k.bits() < 64 {
-            // Canonical operands are small enough that the 64-bit result is
-            // exact; overflow is just a range check.
-            let lo = self.b.ins().icmp_imm(IntCC::SignedLessThan, r, k.min() as i64);
-            let hi = self.b.ins().icmp_imm(IntCC::SignedGreaterThan, r, k.max() as i64);
-            self.b.ins().bor(lo, hi)
-        } else if k.signed() {
-            match op {
-                // Signed add/sub overflowed iff the result sign is impossible
-                // given the operand signs.
-                BinOp::Add => {
-                    let a = self.b.ins().bxor(lv, r);
-                    let b = self.b.ins().bxor(rv, r);
-                    let t = self.b.ins().band(a, b);
-                    self.b.ins().icmp_imm(IntCC::SignedLessThan, t, 0)
-                }
-                BinOp::Sub => {
-                    let a = self.b.ins().bxor(lv, rv);
-                    let b = self.b.ins().bxor(lv, r);
-                    let t = self.b.ins().band(a, b);
-                    self.b.ins().icmp_imm(IntCC::SignedLessThan, t, 0)
-                }
-                BinOp::Mul => {
-                    // Exact iff the high half equals the low half's sign.
-                    let hi = self.b.ins().smulhi(lv, rv);
-                    let sign = self.b.ins().sshr_imm(r, 63);
-                    self.b.ins().icmp(IntCC::NotEqual, hi, sign)
-                }
-                _ => unreachable!(),
-            }
-        } else {
-            match op {
-                BinOp::Add => self.b.ins().icmp(IntCC::UnsignedLessThan, r, lv),
-                BinOp::Sub => self.b.ins().icmp(IntCC::UnsignedLessThan, lv, rv),
-                BinOp::Mul => {
-                    let hi = self.b.ins().umulhi(lv, rv);
-                    self.b.ins().icmp_imm(IntCC::NotEqual, hi, 0)
-                }
-                _ => unreachable!(),
-            }
-        };
+    /// Panic if a narrow (< 64-bit) add/sub/mul result overflowed the
+    /// integer kind. Canonical operands are small enough that the 64-bit
+    /// result is exact, so overflow is just a range check.
+    fn check_overflow(&mut self, k: IntKind, r: Value, line: u32) {
+        debug_assert!(k.bits() < 64, "full-width ops use the hardware overflow flag");
+        let lo = self.b.ins().icmp_imm(IntCC::SignedLessThan, r, k.min() as i64);
+        let hi = self.b.ins().icmp_imm(IntCC::SignedGreaterThan, r, k.max() as i64);
+        let overflow = self.b.ins().bor(lo, hi);
         self.panic_if(overflow, Rt::PanicOverflow, line);
     }
 
