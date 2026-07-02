@@ -73,9 +73,10 @@ into every executable). Key points, expanded in
   Cranelift, emitting a native object file directly; the only external step
   is the final `cc` link, exactly like rustc.
 - **Precise, moving GC**: compiler-emitted stack maps plus a write barrier
-  and remembered set; a bump-allocated nursery is evacuated Cheney-style
-  into a mark-sweep old generation. Objects really move — the test suite
-  reruns every semantic test with a 64 KiB nursery to prove it.
+  and remembered set; a bump-allocated nursery — sized adaptively
+  (512 KiB–64 MiB) from observed survival — is evacuated Cheney-style into
+  a mark-sweep old generation. Objects really move — the test suite reruns
+  every semantic test with a 64 KiB nursery to prove it.
 - **Monomorphization by shape**: all reference instantiations of a generic
   function share one compiled body; scalar ones specialize by width and
   register class. GC descriptors deduplicate by object shape.

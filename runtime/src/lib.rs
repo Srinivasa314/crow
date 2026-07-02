@@ -26,7 +26,8 @@
 //! - Nursery: a contiguous block with bump allocation. A minor collection
 //!   evacuates live objects into the old generation (everything that survives
 //!   one minor GC is promoted) using a Cheney-style scan, then resets the
-//!   bump pointer.
+//!   bump pointer. The block is sized adaptively (512 KiB to 64 MiB) from
+//!   the survival ratio observed at each minor GC; CROW_NURSERY_KB pins it.
 //! - Old generation: individually allocated blocks collected by mark-sweep
 //!   when the promoted volume passes a threshold.
 //!
@@ -191,6 +192,11 @@ struct Gc {
     promoted_bytes: u64,
     /// Frame pointer of the entry wrapper; the stack walk stops here.
     stack_base: u64,
+    /// Nursery resizing based on observed survival (off when CROW_NURSERY_KB
+    /// pins the size). The streaks count consecutive qualifying minor GCs.
+    nursery_adaptive: bool,
+    grow_streak: u32,
+    shrink_streak: u32,
     /// Stack map table, sorted by absolute return address.
     sm_pcs: Vec<u64>,
     /// (frame size below the record, start, count), parallel to `sm_pcs`;
@@ -219,6 +225,9 @@ static GC: Racy<Gc> = Racy(UnsafeCell::new(Gc {
     major_count: 0,
     promoted_bytes: 0,
     stack_base: 0,
+    nursery_adaptive: false,
+    grow_streak: 0,
+    shrink_streak: 0,
     sm_pcs: Vec::new(),
     sm_ranges: Vec::new(),
     sm_slots: Vec::new(),
@@ -231,10 +240,17 @@ fn gc() -> &'static mut Gc {
     unsafe { &mut *GC.0.get() }
 }
 
-// 8 MiB keeps allocation-heavy workloads with megabyte-scale live sets
-// (e.g. tree building) inside the nursery; at 512 KiB such programs promoted
-// nearly everything on every minor GC. Tune with CROW_NURSERY_KB.
-const DEFAULT_NURSERY_KB: usize = 8 * 1024;
+// The nursery is adaptive: it starts small and cache-friendly, doubles when
+// minor GCs keep observing high survival (a live working set that doesn't
+// fit promotes nearly everything, as tree-building workloads showed at a
+// fixed 512 KiB), and halves again after a long run of near-zero survival.
+// CROW_NURSERY_KB pins the size and disables adaptation.
+const NURSERY_FLOOR_KB: usize = 512;
+const NURSERY_CAP_KB: usize = 64 * 1024;
+/// Grow after this many consecutive full minors promoting >= 1/4 of the
+/// nursery; shrink after this many promoting <= 1/50.
+const GROW_STREAK: u32 = 2;
+const SHRINK_STREAK: u32 = 16;
 const DEFAULT_MAJOR_MB: usize = 8;
 
 /// The current frame pointer. `inline(never)` plus forced frame pointers
@@ -397,8 +413,67 @@ impl Gc {
                 t0.elapsed()
             );
         }
+        if self.nursery_adaptive {
+            self.adapt_nursery(used_before, self.old_bytes - old_before);
+        }
         if self.old_bytes > self.major_threshold {
             self.major_gc();
+        }
+    }
+
+    /// Resize the nursery based on this minor GC's survival ratio. Called
+    /// right after evacuation — the nursery is empty and nothing points into
+    /// it, so swapping the block is safe.
+    unsafe fn adapt_nursery(&mut self, allocated: usize, promoted: usize) {
+        let size = self.nursery_end as usize - self.nursery_start as usize;
+        // A collection of a half-empty nursery was forced (gc_collect, old-gen
+        // pressure) and says nothing about the steady-state survival ratio.
+        if allocated < size / 2 {
+            return;
+        }
+        if promoted * 4 >= allocated && size < NURSERY_CAP_KB * 1024 {
+            // The live working set doesn't fit: promotion is wasted copying
+            // that a larger nursery avoids entirely.
+            self.grow_streak += 1;
+            self.shrink_streak = 0;
+            if self.grow_streak >= GROW_STREAK {
+                self.set_nursery_size(size * 2);
+                self.grow_streak = 0;
+            }
+        } else if promoted * 50 <= allocated && size > NURSERY_FLOOR_KB * 1024 {
+            // Almost everything dies young; a smaller nursery frees memory
+            // and stays hotter in cache.
+            self.shrink_streak += 1;
+            self.grow_streak = 0;
+            if self.shrink_streak >= SHRINK_STREAK {
+                self.set_nursery_size(size / 2);
+                self.shrink_streak = 0;
+            }
+        } else {
+            self.grow_streak = 0;
+            self.shrink_streak = 0;
+        }
+    }
+
+    /// Replace the (empty) nursery block with one of `new_size` bytes.
+    unsafe fn set_nursery_size(&mut self, new_size: usize) {
+        let new_size = new_size.clamp(NURSERY_FLOOR_KB * 1024, NURSERY_CAP_KB * 1024);
+        let old_size = self.nursery_end as usize - self.nursery_start as usize;
+        if new_size == old_size {
+            return;
+        }
+        debug_assert_eq!(self.nursery_ptr, self.nursery_start, "nursery must be empty");
+        let old_layout = std::alloc::Layout::from_size_align(old_size, 16).unwrap();
+        std::alloc::dealloc(self.nursery_start, old_layout);
+        let layout = std::alloc::Layout::from_size_align(new_size, 16).unwrap();
+        self.nursery_start = std::alloc::alloc(layout);
+        if self.nursery_start.is_null() {
+            panic_rt("out of memory");
+        }
+        self.nursery_end = self.nursery_start.add(new_size);
+        self.nursery_ptr = self.nursery_start;
+        if self.log {
+            eprintln!("[crow-gc] nursery resized to {} KiB", new_size / 1024);
         }
     }
 
@@ -540,11 +615,12 @@ pub extern "C" fn crow_rt_init(stack_base: u64) {
     let g = gc();
     g.stack_base = stack_base;
     unsafe { crow_stack_limit = stack_limit_for(stack_base) };
-    let kb = std::env::var("CROW_NURSERY_KB")
+    // A pinned size (CROW_NURSERY_KB) disables adaptive resizing.
+    let pinned = std::env::var("CROW_NURSERY_KB")
         .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_NURSERY_KB)
-        .max(16);
+        .and_then(|v| v.parse::<usize>().ok());
+    g.nursery_adaptive = pinned.is_none();
+    let kb = pinned.unwrap_or(NURSERY_FLOOR_KB).max(16);
     let size = kb * 1024;
     let layout = std::alloc::Layout::from_size_align(size, 16).unwrap();
     unsafe {

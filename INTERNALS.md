@@ -73,9 +73,16 @@ named functions and using a function name as a value allocates nothing.
 
 Precise, generational, two generations:
 
-- **Nursery** (8 MiB by default; `CROW_NURSERY_KB` overrides): contiguous bump allocation. A **minor GC**
-  evacuates live objects into the old generation Cheney-style and resets the
-  bump pointer. Objects that survive one minor collection are promoted.
+- **Nursery**: contiguous bump allocation. A **minor GC** evacuates live
+  objects into the old generation Cheney-style and resets the bump pointer.
+  Objects that survive one minor collection are promoted. The nursery is
+  **sized adaptively** from the survival ratio each minor GC observes: it
+  starts at 512 KiB, doubles (up to 64 MiB) after two consecutive full
+  collections that promote ≥ 1/4 of it — the signature of a live working
+  set that doesn't fit — and halves (back down to 512 KiB) after sixteen
+  consecutive collections promoting ≤ 1/50. Resizing happens right after
+  evacuation, the one moment the nursery is empty and nothing points into
+  it. `CROW_NURSERY_KB` pins the size and disables adaptation.
 - **Old generation**: individually allocated blocks, collected by
   **mark-sweep** when promoted volume crosses a threshold (8 MiB or 2× the
   live size after the last major GC).
@@ -157,9 +164,9 @@ executes before initialization passes trivially.
 ## Debugging knobs
 
 - `CROW_GC_LOG=1` — log every collection and an exit summary.
-- `CROW_NURSERY_KB=N` — shrink the nursery (e.g. 64) to force frequent
-  collections; the test suite runs every semantic test this way to
-  stress-test relocation.
+- `CROW_NURSERY_KB=N` — pin the nursery size, disabling adaptive resizing
+  (e.g. 64 to force frequent collections; the test suite runs every
+  semantic test this way to stress-test relocation).
 - `CROW_STACK_KB=N` — cap the usable stack below the startup frame (mainly
   for the stack-guard tests).
 - `CROW_GC_DEBUG=1` — trace every stack-map root the collector walks.

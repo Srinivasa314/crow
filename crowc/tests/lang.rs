@@ -2082,3 +2082,78 @@ fn main() {
 "#,
     );
 }
+
+// A live working set larger than the nursery floor makes the collector grow
+// the nursery (visible in the GC log); pinning the size disables adaptation.
+#[test]
+fn nursery_adapts_to_working_set() {
+    let src = r#"
+struct Tree { left: Tree, right: Tree, value: int }
+fn build(depth: int, value: int): Tree {
+    if depth == 0 { return Tree { left: nil, right: nil, value: value }; }
+    Tree { left: build(depth - 1, value * 2), right: build(depth - 1, value * 2 + 1), value: value }
+}
+fn sum(t: Tree): int {
+    if t == nil { return 0; }
+    t.value + sum(t.left) + sum(t.right)
+}
+fn main() {
+    let total = 0;
+    for (let i = 0; i < 10; i += 1) { total += sum(build(14, 1)); }
+    println(total);
+}
+"#;
+    let out = run_program(src, &[("CROW_GC_LOG", "1")]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("nursery resized to 1024 KiB"),
+        "expected the nursery to grow:\n{}",
+        out.stderr
+    );
+    // A pinned nursery never resizes, no matter the workload.
+    let out = run_program(src, &[("CROW_GC_LOG", "1"), ("CROW_NURSERY_KB", "64")]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(
+        !out.stderr.contains("resized"),
+        "pinned nursery must not adapt:\n{}",
+        out.stderr
+    );
+}
+
+// After the big-live-set phase ends, sustained near-zero survival shrinks
+// the nursery back down.
+#[test]
+fn nursery_shrinks_after_allocation_phase() {
+    let src = r#"
+struct Tree { left: Tree, right: Tree, value: int }
+fn build(depth: int, value: int): Tree {
+    if depth == 0 { return Tree { left: nil, right: nil, value: value }; }
+    Tree { left: build(depth - 1, value * 2), right: build(depth - 1, value * 2 + 1), value: value }
+}
+fn sum(t: Tree): int {
+    if t == nil { return 0; }
+    t.value + sum(t.left) + sum(t.right)
+}
+fn main() {
+    let total = 0;
+    for (let i = 0; i < 10; i += 1) { total += sum(build(14, 1)); }
+    for (let i = 0; i < 8000000; i += 1) { let s = itos(i); }
+    println(total);
+}
+"#;
+    let out = run_program(src, &[("CROW_GC_LOG", "1")]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let sizes: Vec<u64> = out
+        .stderr
+        .lines()
+        .filter_map(|l| l.strip_prefix("[crow-gc] nursery resized to "))
+        .filter_map(|l| l.strip_suffix(" KiB"))
+        .filter_map(|n| n.parse().ok())
+        .collect();
+    let peak = sizes.iter().copied().max().unwrap_or(0);
+    assert!(peak >= 1024, "expected growth first: {sizes:?}");
+    assert!(
+        *sizes.last().unwrap() < peak,
+        "expected a shrink after the garbage phase: {sizes:?}"
+    );
+}
