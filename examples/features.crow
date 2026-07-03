@@ -1,8 +1,13 @@
 /* A compact tour of every Crow feature. /* Block comments nest. */ Still here. */
 
 struct Point { x: int, y: int }
-struct Node { value: int, next: Node }
+struct Node { value: int, next: Option<Node> }
 struct Pair<T> { a: T, b: T }
+
+// Enums: variants are bare, wrap a single value, or carry named fields
+// inline; construction and patterns are qualified with the enum name.
+enum Shape { Circle(float), Rect { w: float, h: float }, Empty }
+enum Color { Red, Green, Blue }
 
 // The final statement of any body may be a bare expression: it is returned.
 fn double(x: int): int { x * 2 }
@@ -14,27 +19,61 @@ fn id<T>(x: T): T { x }
 fn first<T>(xs: [T]): T { xs[0] }
 fn empty<T>(): [T] { [] }
 
-fn make_list(n: int): Node {
-    let head: Node = nil;
+fn make_list(n: int): Option<Node> {
+    let head: Option<Node> = Option.None;
     for (let i = 0; i < n; i += 1) {
-        head = Node { value: i, next: head };
+        head = Option.Some(Node { value: i, next: head });
     }
     head
 }
 
-fn sum_list(list: Node): int {
+fn sum_list(list: Option<Node>): int {
     let total = 0;
-    while list != nil {
-        total += list.value;
-        list = list.next;
+    let cur = list;
+    let go = true;
+    while go {
+        match cur {
+            Option.Some(n) => { total += n.value; cur = n.next; }
+            Option.None => { go = false; }
+        }
     }
     total
 }
 
+// match is also an expression: single-expression arms, one common type,
+// exhaustive. A tail match needs parens, like a tail if.
+fn area(s: Shape): float {
+    (match s {
+        Shape.Circle(r) => 3.0 * r * r,
+        Shape.Rect { w, h } => w * h,   // field patterns; `w` = `w: w`
+        Shape.Empty => 0.0,
+    })
+}
+
 fn main() {
-    // structs, recursion through references, nil
+    // structs, recursion through Option — there is no nil
     println(sum_list(make_list(100)));     // 4950
-    assert(sum_list(nil) == 0);
+    assert(sum_list(Option.None) == 0);
+
+    // enums with payloads, matched by qualified patterns
+    println(ftos(area(Shape.Circle(2.0))));                    // 12.0
+    println(ftos(area(Shape.Rect { w: 2.0, h: 3.0 })));       // 6.0
+
+    // bare variants are shared singletons: == is structural for them
+    let c = Color.Green;
+    assert(c == Color.Green && c != Color.Blue);
+    match c {
+        Color.Red => { println("red"); }
+        _ => { println("not red"); }
+    }
+
+    // match on integers and bools: literal arms, '_' for the rest
+    let n = 7;
+    println(match n { 0 => "zero", 7 => "seven", _ => "other" });
+
+    // Option in the prelude; unwrap panics on None with a line number
+    let hit = make_list(3);
+    assert(unwrap(hit).value == 2);
 
     // arrays: literals, push/pop/len, indexing, nesting, aliasing
     let xs = [1, 2, 3];
@@ -48,14 +87,14 @@ fn main() {
     println(grid[1][0] + xs[1]);           // 203
 
     // control flow: parenless conditions, break/continue, optional for clauses
-    let c = 0;
+    let count = 0;
     for (let i = 0; i < 100; i += 1) {
         if i % 2 == 0 { continue; }
         if i > 50 { break; }
-        c += i;
+        count += i;
     }
     for (;;) { break; }
-    println(c);                            // 625
+    println(count);                        // 625
 
     // if is also an expression (else required, only the taken branch runs)
     let temp = 72;
@@ -100,6 +139,7 @@ lines, and \u{2192} escapes \u{1F600}");
     let bs = stob(word);                   // string <-> bytes copies, so
     bs[0] -= 32;                           // the string stays untouched
     println(btos(bs) + word);              // Crowcrow (btos checks UTF-8)
+    println(match word[0] { b'c' => "caw", _ => "?" });   // byte patterns
 
     // number <-> string conversions (stoi/stof are strict: bad input panics)
     println(itos(stoi("-42") + 42) + "/" + ftos(stof("2.5") * itof(4)));
@@ -126,8 +166,8 @@ lines, and \u{2192} escapes \u{1F600}");
     println(~flags);                       // 8: ~ stays in the operand's width
 
     // bools, short-circuit, shadowing
-    let maybe: Node = nil;
-    assert(maybe == nil || maybe.value >= 0);   // rhs never evaluated
+    let maybe = make_list(0);
+    assert((match maybe { Option.Some(x) => x.value, Option.None => -1 }) == -1);
     let shadow = 1;
     { let shadow = shadow + 1; assert(shadow == 2); }
     assert(shadow == 1);

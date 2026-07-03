@@ -12,6 +12,7 @@
 //!   word 1 (aux):  string -> byte length,
 //!                  scalar buffer -> capacity in bytes,
 //!                  ref buffer -> capacity in elements (8 bytes each),
+//!                  enum -> variant tag,
 //!                  struct/closure -> 0
 //!   offset 16:     payload (fields / bytes / elements)
 //! ```
@@ -55,8 +56,9 @@
 
 // The `unsafe extern "C"` entry points have a single safety contract, stated
 // once here rather than per function: pointer arguments must be valid Crow
-// heap objects (or null where the compiled code null-checks first). Their
-// only callers are compiler-generated code and this runtime itself.
+// heap objects — the language has no nil, so compiled code never passes
+// null. Their only callers are compiler-generated code and this runtime
+// itself.
 #![allow(clippy::missing_safety_doc)]
 
 use std::cell::UnsafeCell;
@@ -729,9 +731,6 @@ unsafe fn alloc_string(bytes: &[u8]) -> *mut u8 {
 
 #[no_mangle]
 pub unsafe extern "C" fn crow_str_concat(a: *mut u8, b: *mut u8) -> *mut u8 {
-    if a.is_null() || b.is_null() {
-        panic_rt("string operation on nil");
-    }
     let g = gc();
     unsafe {
         let mut ra = a as u64;
@@ -755,9 +754,6 @@ pub unsafe extern "C" fn crow_str_concat(a: *mut u8, b: *mut u8) -> *mut u8 {
 
 #[no_mangle]
 pub unsafe extern "C" fn crow_str_eq(a: *mut u8, b: *mut u8) -> u64 {
-    if a.is_null() || b.is_null() {
-        return (a == b) as u64;
-    }
     unsafe { (str_bytes(a) == str_bytes(b)) as u64 }
 }
 
@@ -814,18 +810,12 @@ fn parse_float(txt: &str, line: u64) -> f64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn crow_stoi(s: *mut u8, line: u64) -> i64 {
-    if s.is_null() {
-        panic_rt(&format!("stoi on nil at line {line}"));
-    }
     let txt = unsafe { std::str::from_utf8(str_bytes(s)).unwrap_or("") };
     parse_int(txt, line)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn crow_stof(s: *mut u8, line: u64) -> f64 {
-    if s.is_null() {
-        panic_rt(&format!("stof on nil at line {line}"));
-    }
     let txt = unsafe { std::str::from_utf8(str_bytes(s)).unwrap_or("") };
     parse_float(txt, line)
 }
@@ -833,9 +823,6 @@ pub unsafe extern "C" fn crow_stof(s: *mut u8, line: u64) -> f64 {
 /// `stob(s)`: copy a string's bytes into a fresh `[u8]`.
 #[no_mangle]
 pub unsafe extern "C" fn crow_stob(s: *mut u8) -> *mut u8 {
-    if s.is_null() {
-        panic_rt("stob on nil");
-    }
     let g = gc();
     unsafe {
         let len = aux(s) as usize;
@@ -855,9 +842,6 @@ pub unsafe extern "C" fn crow_stob(s: *mut u8) -> *mut u8 {
 /// (panics otherwise), so every observable string stays valid UTF-8.
 #[no_mangle]
 pub unsafe extern "C" fn crow_btos(arr: *mut u8, line: u64) -> *mut u8 {
-    if arr.is_null() {
-        panic_rt(&format!("btos on nil at line {line}"));
-    }
     let g = gc();
     unsafe {
         let len = *(arr.add(ARR_LEN) as *mut i64) as usize;
@@ -944,9 +928,6 @@ pub extern "C" fn crow_array_new(elem_size: u64, elem_is_ref: u64, cap: u64) -> 
 
 #[no_mangle]
 pub unsafe extern "C" fn crow_array_push(arr: *mut u8, val: u64, elem_size: u64, elem_is_ref: u64) {
-    if arr.is_null() {
-        panic_rt("push on nil array");
-    }
     let g = gc();
     unsafe {
         let len = *(arr.add(ARR_LEN) as *mut i64);
@@ -1004,9 +985,6 @@ pub unsafe extern "C" fn crow_array_push(arr: *mut u8, val: u64, elem_size: u64,
 /// re-extends signed kinds.
 #[no_mangle]
 pub unsafe extern "C" fn crow_array_pop(arr: *mut u8, elem_size: u64) -> u64 {
-    if arr.is_null() {
-        panic_rt("pop on nil array");
-    }
     unsafe {
         let len = *(arr.add(ARR_LEN) as *mut i64);
         if len == 0 {
@@ -1051,9 +1029,6 @@ pub extern "C" fn crow_print_bool(v: u64) {
 
 #[no_mangle]
 pub unsafe extern "C" fn crow_print_str(s: *mut u8) {
-    if s.is_null() {
-        panic_rt("print of nil string");
-    }
     unsafe { out(str_bytes(s)) };
 }
 
@@ -1079,11 +1054,6 @@ pub extern "C" fn crow_panic_bounds(idx: i64, len: i64, line: u64) -> ! {
 }
 
 #[no_mangle]
-pub extern "C" fn crow_panic_null(line: u64) -> ! {
-    panic_rt(&format!("nil dereference at line {line}"));
-}
-
-#[no_mangle]
 pub extern "C" fn crow_panic_div(line: u64) -> ! {
     panic_rt(&format!("division by zero at line {line}"));
 }
@@ -1101,6 +1071,11 @@ pub extern "C" fn crow_panic_shift(line: u64) -> ! {
 #[no_mangle]
 pub extern "C" fn crow_panic_cast(line: u64) -> ! {
     panic_rt(&format!("cast out of range at line {line}"));
+}
+
+#[no_mangle]
+pub extern "C" fn crow_panic_unwrap(line: u64) -> ! {
+    panic_rt(&format!("unwrap of None at line {line}"));
 }
 
 #[no_mangle]

@@ -142,7 +142,6 @@ fn gc_stress_tiny_nursery() {
 fn runtime_panics() {
     let cases = [
         ("fn main() { let xs = [1]; println(xs[3]); }", "index 3 out of bounds"),
-        ("struct P { x: int } fn main() { let p: P = nil; println(p.x); }", "nil dereference"),
         ("fn main() { let z = 0; println(1 / z); }", "division by zero"),
         ("fn main() { assert(1 == 2); }", "assertion failed"),
         ("fn main() { let xs: [int] = []; println(pop(xs)); }", "pop on empty array"),
@@ -169,7 +168,7 @@ fn runtime_panics() {
 fn compile_errors() {
     let cases = [
         ("fn main() { println(1 + \"x\"); }", "mixed types"),
-        ("fn main() { let x = nil; }", "cannot infer"),
+        ("fn main() { let x = []; }", "cannot infer"),
         ("fn main() { unknown(); }", "unknown function"),
         ("fn main() { let x: int = 1; let y: bool = x; }", "type mismatch"),
         ("fn f(): int { let x = 1; } fn main() { }", "must return a value"),

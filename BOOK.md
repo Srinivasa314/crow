@@ -29,11 +29,11 @@ Memory is garbage-collected: you never allocate or free anything by hand.
 ## 2. Variables
 
 ```
-let x = 5;            // inferred: int
-let y: u8 = 5;        // annotated; the literal adopts u8
-let head: Node = nil; // nil needs an annotation to pick its type
-x = x + 1;            // assignment
-x += 1;               // compound assignment (no ++ / --)
+let x = 5;                        // inferred: int
+let y: u8 = 5;                    // annotated; the literal adopts u8
+let m: Option<int> = Option.None; // a bare None needs an annotation to pick T
+x = x + 1;                        // assignment
+x += 1;                           // compound assignment (no ++ / --)
 ```
 
 Only locals are inferred — function signatures are always fully annotated.
@@ -53,20 +53,22 @@ are evaluated once (`a[f()] += 1` calls `f` once). `s += "x"` concatenates.
 | `bool` | `true` / `false`, one byte in memory |
 | `string` | immutable UTF-8 text |
 | `StructName` | user struct |
+| `EnumName` | user enum (§9); `Option<T>` is predeclared |
 | `[T]` | growable array of `T` |
 | `fn(T, ...): R` | function value (closure) |
 
-**Value vs. reference:** numbers and bools are values. Structs, arrays,
-strings, and functions are **references** to heap objects — assignment and
-parameter passing alias, never copy. There is no pointer syntax, no
-address-of, no manual free.
+**Value vs. reference:** numbers and bools are values. Structs, enums,
+arrays, strings, and functions are **references** to heap objects —
+assignment and parameter passing alias, never copy. There is no pointer
+syntax, no address-of, no manual free.
 
 **Storage is packed**: struct fields and array elements occupy their natural
 size (`[u8]` is a real byte buffer, `bool` is one byte).
 
-**`nil`** is the null reference, assignable to and comparable with any heap
-type (struct, array, string, function). Dereferencing `nil` (field access,
-index, call, `len`, …) panics with a line number — never undefined behavior.
+**There is no null.** Every reference always points at a real object, so
+field access, indexing, and calls can never fail on a missing value. Absence
+is a value of the predeclared `Option<T>` enum — `Option.Some(v)` or
+`Option.None` — eliminated with `match` or `unwrap` (§9).
 
 ## 4. Integers
 
@@ -115,9 +117,9 @@ postfix: call ()   index []   field .
 - `%` is integer-only. `< <= > >=` need two ints of the same type or two
   floats — no ordering on strings or references.
 - `==` / `!=` are type-directed: **strings compare by content, references
-  by identity**, numbers/bools by value. Both sides must be the same type
-  (or one side `nil` against a heap type). `f == f` holds for a named
-  function used as a value.
+  by identity**, numbers/bools by value. Both sides must be the same type.
+  `f == f` holds for a named function used as a value, and identity is
+  structural for bare-only enums (§9); other enums reject `==`.
 - **Bitwise** `& | ^ ~ << >>` are integer-only, both operands the same type
   (context flows through them like arithmetic, so `x & 1` works at any
   width). Unlike C, bitwise binds *tighter* than comparison:
@@ -202,16 +204,95 @@ are copied but point at the same object.
 ## 8. Structs
 
 ```
-struct Node { value: int, next: Node }      // recursive types are fine
+struct Node { value: int, next: Option<Node> }   // recursion bottoms out in Option
 
-let n = Node { value: 1, next: nil };       // literal: all fields, by name
-n.value = 2;                                // field read/write with .
+let n = Node { value: 1, next: Option.None };    // literal: all fields, by name
+n.value = 2;                                     // field read/write with .
 ```
 
 No methods, no visibility modifiers, no default values, no inheritance.
 Struct values are references; `a = b` aliases.
 
-## 9. Arrays
+## 9. Enums and match
+
+```
+enum Shape {
+    Circle(float),                  // wraps exactly one value...
+    Rect { w: float, h: float },    // ...or carries named fields inline...
+    Empty,                          // ...or nothing at all: a bare variant
+}
+
+let c = Shape.Circle(2.0);              // construction is qualified
+let r = Shape.Rect { w: 3.0, h: 4.0 };  // field variants use literal syntax
+```
+
+An enum value is exactly one of its variants. A variant is **bare**,
+**wraps a single value**, or carries **named fields** stored inline in the
+enum value itself — a field variant is one object, not a wrapper around a
+struct, so prefer it for multi-field payloads in allocation-heavy code.
+Enum values are references, like structs.
+
+**`match`** is the only way to look inside. As a statement, arms are blocks
+(the comma after a block arm is optional):
+
+```
+match r {
+    Shape.Circle(radius) => { println(radius); }  // binds the payload
+    Shape.Rect { w, h } => { println(w * h); }    // binds each field
+    Shape.Empty => { println("empty"); }
+}
+```
+
+Arms must be **exhaustive**: cover every variant or end with a final `_`
+arm. A wrapping variant's pattern must bind its payload, and a field
+variant's pattern must name every field — `field: name` binds it, a lone
+`field` is shorthand for `field: field`, and binding to `_` ignores the
+value. Binders are new locals scoped to their arm, holding copies of the
+payload values (a reference still aliases the shared object, like any
+assignment).
+
+In expression position `match` yields a value; each arm is a single
+expression, comma-separated, and all arms must have one type:
+
+```
+let area = match s {
+    Shape.Circle(radius) => 3.14159 * radius * radius,
+    Shape.Rect { w, h } => w * h,
+    Shape.Empty => 0.0,
+};
+```
+
+A statement *starting* with `match` is always the statement form (the same
+rule as `if`, §6), so a tail match-expression needs parens:
+`fn area(s: Shape): float { (match s { ... }) }` — or write `return match ...;`.
+
+`match` also works on **integers and bools**: arms are literals (including
+`b'X'` byte literals against a `u8` scrutinee, §15). An integer match needs
+a final `_` arm; a bool match is complete once `true` and `false` are both
+covered.
+
+```
+let name = match n { 0 => "zero", 1 => "one", _ => "many" };
+```
+
+**Equality**: `==` works on an enum whose variants are all bare — bare
+variants are shared singletons, so reference identity *is* structural
+equality (`c == Color.Red` does what it says). On an enum with wrapping
+variants `==` is a compile error; use `match`.
+
+**`Option<T>`** is predeclared, exactly as if the program contained:
+
+```
+enum Option<T> { Some(T), None }
+```
+
+It replaces null everywhere: a recursive type spells its base case as
+`Option.None` (`struct Node { value: int, next: Option<Node> }`), lookups
+return `Option.None` for "not found", and `unwrap(o)` (§13) extracts the
+`Some` payload, panicking on `None` with a line number. A user type named
+`Option` shadows the prelude.
+
+## 10. Arrays
 
 ```
 let xs = [1, 2, 3];          // inferred [int]
@@ -225,14 +306,14 @@ let grid = [[1, 2], [3, 4]]; // nest freely
 
 No slices, no array literals with a repeat count, no negative indexing.
 
-## 10. Strings and bytes
+## 11. Strings and bytes
 
 Immutable. `+` concatenates, `==` compares content, `len` gives byte length.
 
 **Byte indexing**: `s[i]` is the `i`-th **byte** of the string, of type
 `u8`, bounds-checked like arrays. Strings are UTF-8, so a multi-byte
 character is several bytes; the language never decodes at runtime. Compare
-bytes against `b'X'` byte literals (§14):
+bytes against `b'X'` byte literals (§15):
 
 ```
 if s[0] == b'-' { ... }
@@ -258,7 +339,7 @@ fn upper(s: string): string {
 No slicing, no interpolation — build strings with `+`, `itos`, `ftos`,
 `btos`; parse them with `s[i]`, `stoi`, `stof`, `stob`.
 
-## 11. Generics
+## 12. Generics
 
 ```
 fn id<T>(x: T): T { x }
@@ -278,7 +359,7 @@ let xs: [string] = empty();         // ...or from the expected type
 (Instantiations are shared aggressively under the hood — see
 [INTERNALS.md](INTERNALS.md) if you're curious how.)
 
-## 12. Builtins
+## 13. Builtins
 
 Ordinary call syntax; user definitions with the same name shadow them.
 Builtins can only be called, not used as values.
@@ -292,6 +373,7 @@ Builtins can only be called, not used as values.
 | `itof(i)` / `ftoi(f)` | int ↔ float (`ftoi` = `as int`, checked) |
 | `stoi(s)` / `stof(f)` | string → number; **panics** on malformed input |
 | `stob(s)` / `btos(bs)` | string ↔ `[u8]` (both copy; `btos` **panics** on invalid UTF-8) |
+| `unwrap(o)` | `Option<T>` → `T`; **panics** on `Option.None` |
 | `assert(cond)` | panic if false |
 | `gc_collect()` | force a full collection |
 
@@ -301,13 +383,13 @@ scientific notation (again with `-` only), and the result must be finite.
 Anything else panics with the offending text and line number; validate
 first with `s[i]` when input is untrusted.
 
-## 13. When things go wrong
+## 14. When things go wrong
 
 Every error path panics with a **line number**; there is no undefined
 behavior:
 
 - array or string index out of bounds; `pop` on empty
-- `nil` dereference
+- `unwrap` of `Option.None`
 - integer overflow, `/ 0`, `% 0`, `MIN / -1`, `-MIN`
 - shift amount out of `[0, bits)`
 - out-of-range `as` casts (including float → int)
@@ -317,12 +399,12 @@ behavior:
 A panic prints its message to stderr and exits with code 101. Panics are
 not catchable — there are no exceptions.
 
-## 14. Appendix: lexical structure
+## 15. Appendix: lexical structure
 
 - **Comments**: `// line` and `/* block */`. Block comments **nest**.
 - **Identifiers**: `[A-Za-z_][A-Za-z0-9_]*`.
-- **Keywords**: `fn struct let if else while for return break continue
-  true false nil as`.
+- **Keywords**: `fn struct enum match let if else while for return break
+  continue true false as`.
 - **Integer literals**: decimal only. Untyped until context types them
   (§4); default `int`.
 - **Float literals**: `4.5` — a `.` with digits makes it a float.
@@ -337,11 +419,13 @@ not catchable — there are no exceptions.
   `{ ... }` and are required for all control-flow bodies (no braceless
   `if`).
 
-## 15. Appendix: grammar sketch
+## 16. Appendix: grammar sketch
 
 ```
-program   := (struct | func)*
+program   := (struct | enum | func)*
 struct    := "struct" IDENT generics? "{" (IDENT ":" type),* "}"
+enum      := "enum" IDENT generics? "{" (IDENT payload?),* "}"
+payload   := "(" type ")" | "{" (IDENT ":" type),* "}"
 func      := "fn" IDENT generics? "(" (IDENT ":" type),* ")" (":" type)? fbody
 generics  := "<" IDENT,+ ">"
 type      := "int" | "i8".."u64" | "float" | "bool" | "string"
@@ -351,6 +435,7 @@ fbody     := "{" stmt* expr? "}"     // trailing expr = implicit return
 stmt      := "let" IDENT (":" type)? "=" expr ";"
            | lvalue assign_op expr ";"  | expr ";"
            | "if" cond block ("else" (if | block))?
+           | "match" cond "{" (pattern "=>" block ","?)* "}"
            | "while" cond block
            | "for" "(" init? ";" cond? ";" step? ")" block
            | "return" expr? ";" | "break" ";" | "continue" ";"
@@ -358,19 +443,26 @@ assign_op := "=" | "+=" | "-=" | "*=" | "/=" | "%="
            | "&=" | "|=" | "^=" | "<<=" | ">>="
 cond      := expr            // no leading struct literal unless parenthesized
 expr      := precedence chain of §5 over:
-             literal | IDENT | "nil" | "(" expr ")"
+             literal | IDENT | "(" expr ")"
            | IDENT "{" (IDENT ":" expr),* "}"        // struct literal
+           | IDENT "." IDENT ("(" expr ")")?         // enum variant (checker-resolved)
+           | IDENT "." IDENT "{" (IDENT ":" expr),* "}"   // field-variant literal
            | "[" expr,* "]"                          // array literal
            | "fn" "(" params ")" (":" type)? fbody   // lambda
-           | if_expr
+           | if_expr | match_expr
            | expr "(" args ")" | expr "[" expr "]" | expr "." IDENT
            | expr "as" type
 if_expr   := "if" cond "{" expr "}" "else" (if_expr | "{" expr "}")
+match_expr:= "match" cond "{" (pattern "=>" expr),* "}"
+pattern   := IDENT "." IDENT pargs?               // qualified variant
+           | "-"? INT | BYTE | "true" | "false" | "_"
+pargs     := "(" IDENT ")" | "{" (IDENT (":" IDENT)?),* "}"
 ```
 
-## 16. What Crow deliberately doesn't have
+## 17. What Crow deliberately doesn't have
 
-Modules/imports, methods, enums/unions, pattern matching, traits/interfaces,
-operator overloading, exceptions (panics only, non-catchable), string
+Modules/imports, methods, traits/interfaces, operator overloading,
+exceptions (panics only, non-catchable), null (absence is `Option<T>`),
+nested match patterns (one constructor deep only), string
 slicing/interpolation, hash maps, and any form of manual memory management.
 One file in, one binary out.

@@ -26,7 +26,7 @@ once per type. A shape is exactly what codegen and the GC care about: the ABI
 register class (float vs word), whether the value is a GC reference (stack
 maps, write barriers, descriptor refmaps), and the packed storage width and
 signedness (struct layout, array elements). Every reference type — strings,
-structs, arrays, functions — shares the `Ref` shape, so `id<string>` and
+structs, enums, arrays, functions — shares the `Ref` shape, so `id<string>` and
 `id<Point>` share one compiled body, and generic structs instantiated at
 reference types share one GC descriptor. Scalar instantiations specialize by
 width, signedness, and register class.
@@ -61,6 +61,26 @@ natural size, aligned to that size; since references are 8 bytes wide they
 always land on word boundaries, which the refmap relies on. String literals
 are emitted as pre-built `STATIC` objects in the data segment, so the GC
 never touches them.
+
+Enum values are ordinary struct-kind objects that keep their **variant tag
+in the aux word** — free for struct-kind objects, and copied with the header
+when the GC moves the object. A variant's payload — one slot for a
+single-value variant, packed fields (exactly like struct fields) for an
+inline-field variant — lays out per variant, and each variant instantiation
+gets a descriptor through the same shape-keyed cache as structs, so a
+one-ref-slot variant shares its descriptor with every one-ref-field struct;
+the tag lives in the object, never in the (shared, identity-free)
+descriptor, and the GC needs no enum-specific code at all.
+This is sound because an object's variant can never change in place — Crow
+has no way to overwrite a whole payload, only fields within it. Bare
+variants are emitted as pre-built `STATIC` singletons (like string
+literals): constructing one is just taking its address, and for enums whose
+variants are all bare, `==` is correct as plain pointer identity. `match`
+compiles to a load of the aux word plus a compare chain; the final arm is an
+unconditional fallthrough because the checker proved exhaustiveness. One
+consequence of spending aux: strings, buffers, and enums have now used the
+header's spare word, so any future per-object metadata (say, a reflection
+type-id) must grow the header rather than squeeze in.
 
 Arrays are `{ buf, len, cap }` structs pointing at a separate buffer object,
 so `push` can reallocate while existing references stay valid. Closures are
@@ -157,9 +177,10 @@ executes before initialization passes trivially.
   right-hand side for the same reason — the RHS may have allocated (moving
   the buffer) or popped the array.
 - The runtime's `extern "C"` entry points are `unsafe` with one shared
-  contract: pointer arguments must be valid Crow heap objects (or null where
-  compiled code null-checks first); their only callers are
-  compiler-generated code and the runtime itself.
+  contract: pointer arguments must be valid Crow heap objects — the language
+  has no nil, so references are never null and compiled code emits no null
+  checks anywhere. Their only callers are compiler-generated code and the
+  runtime itself.
 
 ## Debugging knobs
 

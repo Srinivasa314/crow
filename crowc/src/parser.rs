@@ -136,16 +136,18 @@ impl Parser {
 
     fn program(&mut self) -> PResult<Program> {
         let mut structs = Vec::new();
+        let mut enums = Vec::new();
         let mut funcs = Vec::new();
         loop {
             match self.peek() {
                 Tok::Eof => break,
                 Tok::Struct => structs.push(self.struct_def()?),
+                Tok::Enum => enums.push(self.enum_def()?),
                 Tok::Fn => funcs.push(self.func_def()?),
-                _ => return self.err("expected 'fn' or 'struct' at top level"),
+                _ => return self.err("expected 'fn', 'struct', or 'enum' at top level"),
             }
         }
-        Ok(Program { structs, funcs })
+        Ok(Program { structs, enums, funcs })
     }
 
     /// Optional `<T, U, ...>` type parameter list on a declaration.
@@ -181,6 +183,47 @@ impl Parser {
         }
         self.expect(Tok::RBrace)?;
         Ok(StructDef { name, type_params, fields, line })
+    }
+
+    /// `enum Name<T,...> { Bare, Wrapping(type), Record { f: type, ... } }`
+    /// — a variant is bare, wraps exactly one value, or carries named
+    /// fields stored inline in the enum object.
+    fn enum_def(&mut self) -> PResult<EnumDef> {
+        let line = self.line();
+        self.expect(Tok::Enum)?;
+        let name = self.ident()?;
+        let type_params = self.type_params()?;
+        self.expect(Tok::LBrace)?;
+        let mut variants = Vec::new();
+        while self.peek() != &Tok::RBrace {
+            let vname = self.ident()?;
+            let payload = if self.eat(&Tok::LParen) {
+                let ty = self.type_expr()?;
+                self.expect(Tok::RParen)?;
+                VariantPayloadExpr::Single(ty)
+            } else if self.eat(&Tok::LBrace) {
+                let mut fields = Vec::new();
+                while self.peek() != &Tok::RBrace {
+                    let fname = self.ident()?;
+                    self.expect(Tok::Colon)?;
+                    let ty = self.type_expr()?;
+                    fields.push((fname, ty));
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(Tok::RBrace)?;
+                VariantPayloadExpr::Fields(fields)
+            } else {
+                VariantPayloadExpr::Bare
+            };
+            variants.push((vname, payload));
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(Tok::RBrace)?;
+        Ok(EnumDef { name, type_params, variants, line })
     }
 
     fn func_def(&mut self) -> PResult<FuncDef> {
@@ -298,6 +341,7 @@ impl Parser {
                     Tok::Eof => return p.err("expected '}'"),
                     Tok::Let
                     | Tok::If
+                    | Tok::Match
                     | Tok::While
                     | Tok::For
                     | Tok::Return
@@ -341,6 +385,7 @@ impl Parser {
                 Ok(s)
             }
             Tok::If => self.if_stmt(),
+            Tok::Match => self.match_stmt(),
             Tok::While => {
                 self.next();
                 let cond = self.cond()?;
@@ -426,6 +471,27 @@ impl Parser {
             None
         };
         Ok(Stmt::If { cond, then, els })
+    }
+
+    /// `match expr { pat => { ... }, ... }` in statement position. Arms are
+    /// blocks (like all statement bodies); the comma after a block is
+    /// optional. The scrutinee gets the same struct-literal restriction as
+    /// if/while conditions, so `match x {` reads the `{` as the match body.
+    fn match_stmt(&mut self) -> PResult<Stmt> {
+        let line = self.line();
+        self.expect(Tok::Match)?;
+        let scrutinee = self.cond()?;
+        self.expect(Tok::LBrace)?;
+        let mut arms = Vec::new();
+        while self.peek() != &Tok::RBrace {
+            let pat = self.pattern()?;
+            self.expect(Tok::FatArrow)?;
+            let body = self.block()?;
+            arms.push((pat, body));
+            self.eat(&Tok::Comma);
+        }
+        self.expect(Tok::RBrace)?;
+        Ok(Stmt::Match { scrutinee, arms, line })
     }
 
     fn for_stmt(&mut self) -> PResult<Stmt> {
@@ -662,6 +728,38 @@ impl Parser {
                 Tok::Dot => {
                     self.next();
                     let name = self.ident()?;
+                    // `EnumName.Variant { field: value, ... }`: like a struct
+                    // literal, the name resolves in the type namespace, and
+                    // the same `{` heuristic and condition restriction apply.
+                    if let ExprKind::Var { name: base, .. } = &e.kind {
+                        if self.peek() == &Tok::LBrace
+                            && !self.no_struct
+                            && self.struct_lit_ahead()
+                        {
+                            let (base, variant) = (base.clone(), name);
+                            self.expect(Tok::LBrace)?;
+                            let mut fields = Vec::new();
+                            while self.peek() != &Tok::RBrace {
+                                let fname = self.ident()?;
+                                self.expect(Tok::Colon)?;
+                                let value = self.expr()?;
+                                fields.push((fname, value, 0));
+                                if !self.eat(&Tok::Comma) {
+                                    break;
+                                }
+                            }
+                            self.expect(Tok::RBrace)?;
+                            e = Expr::new(
+                                ExprKind::VariantStructLit {
+                                    enum_name: base,
+                                    variant,
+                                    fields,
+                                },
+                                line,
+                            );
+                            continue;
+                        }
+                    }
                     e = Expr::new(ExprKind::Field { obj: Box::new(e), name, index: 0 }, line);
                 }
                 Tok::LBracket => {
@@ -688,6 +786,7 @@ impl Parser {
                 Ok(Expr::new(ExprKind::Byte(v), line))
             }
             Tok::If => self.if_expr(),
+            Tok::Match => self.match_expr(),
             Tok::Float(v) => {
                 self.next();
                 Ok(Expr::new(ExprKind::Float(v), line))
@@ -703,10 +802,6 @@ impl Parser {
             Tok::False => {
                 self.next();
                 Ok(Expr::new(ExprKind::Bool(false), line))
-            }
-            Tok::Nil => {
-                self.next();
-                Ok(Expr::new(ExprKind::Nil, line))
             }
             Tok::Ident(name) => {
                 self.next();
@@ -787,6 +882,111 @@ impl Parser {
             ExprKind::If { cond: Box::new(cond), then: Box::new(then), els: Box::new(els) },
             line,
         ))
+    }
+
+    /// `match expr { pat => expr, ... }` in expression position. Each arm is
+    /// a single expression; arms are comma-separated (trailing comma
+    /// allowed). A statement *starting* with `match` is always the match
+    /// statement, so a tail match-expression needs parens, like `if`.
+    fn match_expr(&mut self) -> PResult<Expr> {
+        self.nested(Self::match_expr_inner)
+    }
+
+    fn match_expr_inner(&mut self) -> PResult<Expr> {
+        let line = self.line();
+        self.expect(Tok::Match)?;
+        let scrutinee = self.cond()?;
+        self.expect(Tok::LBrace)?;
+        let mut arms = Vec::new();
+        while self.peek() != &Tok::RBrace {
+            let pat = self.pattern()?;
+            self.expect(Tok::FatArrow)?;
+            let body = self.unrestricted(|p| p.expr())?;
+            arms.push((pat, body));
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(Tok::RBrace)?;
+        Ok(Expr::new(
+            ExprKind::Match { scrutinee: Box::new(scrutinee), arms },
+            line,
+        ))
+    }
+
+    /// One-constructor-deep match pattern: `Enum.Variant`,
+    /// `Enum.Variant(binder)`, a literal, or `_`.
+    fn pattern(&mut self) -> PResult<Pattern> {
+        let line = self.line();
+        match self.peek().clone() {
+            Tok::Ident(name) if name == "_" => {
+                self.next();
+                Ok(Pattern::Wildcard { line })
+            }
+            Tok::Ident(enum_name) => {
+                self.next();
+                self.expect(Tok::Dot)?;
+                let variant = self.ident()?;
+                let binder = |name: String| PatBinder {
+                    name,
+                    local: 0,
+                    ty: crate::types::Type::Unknown,
+                };
+                let args = if self.eat(&Tok::LParen) {
+                    let bname = self.ident()?;
+                    self.expect(Tok::RParen)?;
+                    PatArgs::Single(binder(bname))
+                } else if self.eat(&Tok::LBrace) {
+                    // `{ field: name, ... }`; a lone `field` binds a local
+                    // of the same name. Every declared field must appear.
+                    let mut fields = Vec::new();
+                    while self.peek() != &Tok::RBrace {
+                        let fname = self.ident()?;
+                        let bname = if self.eat(&Tok::Colon) {
+                            self.ident()?
+                        } else {
+                            fname.clone()
+                        };
+                        fields.push((fname, binder(bname), 0));
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(Tok::RBrace)?;
+                    PatArgs::Fields(fields)
+                } else {
+                    PatArgs::Bare
+                };
+                Ok(Pattern::Variant { enum_name, variant, args, tag: 0, line })
+            }
+            Tok::Int(digits) => {
+                self.next();
+                Ok(Pattern::IntLit { neg: false, digits, value: 0, line })
+            }
+            Tok::Minus => {
+                self.next();
+                match self.peek().clone() {
+                    Tok::Int(digits) => {
+                        self.next();
+                        Ok(Pattern::IntLit { neg: true, digits, value: 0, line })
+                    }
+                    _ => self.err("expected an integer literal after '-' in a pattern"),
+                }
+            }
+            Tok::Byte(value) => {
+                self.next();
+                Ok(Pattern::ByteLit { value, line })
+            }
+            Tok::True => {
+                self.next();
+                Ok(Pattern::BoolLit { value: true, line })
+            }
+            Tok::False => {
+                self.next();
+                Ok(Pattern::BoolLit { value: false, line })
+            }
+            _ => self.err("expected a pattern"),
+        }
     }
 
     /// After `Ident`, decide whether a `{` begins a struct literal. It does
@@ -970,10 +1170,10 @@ struct Pair<T> { a: T, b: T }
 struct Two<K, V> { k: K, v: V }
 fn id<T>(x: T): T { return x; }
 fn main() {
-    let a: Pair<int> = nil;
-    let b: Pair<Pair<int>> = nil;
-    let c: Two<string, [Pair<int>]> = nil;
-    let d: fn(Pair<int>): int = nil;
+    let a: Pair<int> = x;
+    let b: Pair<Pair<int>> = x;
+    let c: Two<string, [Pair<int>]> = x;
+    let d: fn(Pair<int>): int = x;
 }
 "#,
         )
@@ -992,7 +1192,94 @@ fn main() {
         assert!(matches!(&args[0], TypeExpr::Named(n, a, _) if n == "Pair" && a.len() == 1));
         assert!(parse_err("fn f<>() { }").contains("expected identifier"));
         assert!(parse_err("fn f<T() { }").contains("expected '>'"));
-        assert!(parse_err("fn main() { let x: Pair<int = nil; }").contains("expected '>'"));
+        assert!(parse_err("fn main() { let x: Pair<int = y; }").contains("expected '>'"));
+    }
+
+    #[test]
+    fn enum_declarations() {
+        let p = parse_src(
+            r#"
+enum Color { Red, Green, Blue }
+enum Shape<T> { Circle(float), Box(T), Rect { w: float, h: float }, Empty, }
+fn main() { }
+"#,
+        )
+        .unwrap();
+        assert_eq!(p.enums.len(), 2);
+        assert_eq!(p.enums[0].variants.len(), 3);
+        assert!(p.enums[0]
+            .variants
+            .iter()
+            .all(|(_, t)| matches!(t, VariantPayloadExpr::Bare)));
+        assert_eq!(p.enums[1].type_params, vec!["T"]);
+        assert!(matches!(p.enums[1].variants[0].1, VariantPayloadExpr::Single(_)));
+        assert!(matches!(&p.enums[1].variants[2].1,
+            VariantPayloadExpr::Fields(fs) if fs.len() == 2));
+        assert!(matches!(p.enums[1].variants[3].1, VariantPayloadExpr::Bare));
+        assert!(parse_err("enum E { A(int, int) } fn main() { }").contains("expected ')'"));
+        assert!(parse_err("enum E { A: int } fn main() { }").contains("expected '}'"));
+    }
+
+    #[test]
+    fn match_forms() {
+        // Statement position: arms are blocks, comma after a block optional.
+        let p = parse_src(
+            "fn main() { match x { E.A(v) => { f(v); } E.B => { }, _ => { } } }",
+        )
+        .unwrap();
+        let Stmt::Match { arms, .. } = &p.funcs[0].body.stmts[0] else { panic!() };
+        assert_eq!(arms.len(), 3);
+        assert!(matches!(&arms[0].0,
+            Pattern::Variant { args: PatArgs::Single(b), .. } if b.name == "v"));
+        assert!(matches!(&arms[1].0, Pattern::Variant { args: PatArgs::Bare, .. }));
+        assert!(matches!(&arms[2].0, Pattern::Wildcard { .. }));
+        // Field patterns: `field: name` binds, a lone `field` is shorthand.
+        let p = parse_src(
+            "fn main() { match x { E.R { w: a, h } => { } _ => { } } }",
+        )
+        .unwrap();
+        let Stmt::Match { arms, .. } = &p.funcs[0].body.stmts[0] else { panic!() };
+        let Pattern::Variant { args: PatArgs::Fields(fs), .. } = &arms[0].0 else { panic!() };
+        assert_eq!((fs[0].0.as_str(), fs[0].1.name.as_str()), ("w", "a"));
+        assert_eq!((fs[1].0.as_str(), fs[1].1.name.as_str()), ("h", "h"));
+        // Qualified variant struct literals parse in expression position...
+        let p = parse_src("fn main() { let e = E.R { w: 1.0, h: 2.0 }; }").unwrap();
+        let Stmt::Let { init, .. } = &p.funcs[0].body.stmts[0] else { panic!() };
+        assert!(matches!(&init.kind, ExprKind::VariantStructLit { fields, .. }
+            if fields.len() == 2));
+        // ...but not unparenthesized in a condition (same rule as struct
+        // literals): `E.R {` there reads the `{` as the body.
+        assert!(parse_src("fn main() { if x == E.R { w: 1.0 } { } }").is_err());
+        parse_src("fn main() { if (x == E.R { w: 1.0 }) { } }").unwrap();
+        // Expression position: arms are comma-separated expressions.
+        let p = parse_src(
+            "fn main() { let x = match n { 0 => a, -1 => b, b'c' => c, true => d, _ => e, }; }",
+        )
+        .unwrap();
+        let Stmt::Let { init, .. } = &p.funcs[0].body.stmts[0] else { panic!() };
+        let ExprKind::Match { arms, .. } = &init.kind else { panic!() };
+        assert_eq!(arms.len(), 5);
+        assert!(matches!(&arms[1].0, Pattern::IntLit { neg: true, digits: 1, .. }));
+        assert!(matches!(&arms[2].0, Pattern::ByteLit { value: b'c', .. }));
+        assert!(matches!(&arms[3].0, Pattern::BoolLit { value: true, .. }));
+        // Works nested in calls and conditions; scrutinee takes no parens.
+        parse_src("fn main() { f(match x { _ => 1 }); }").unwrap();
+        parse_src("fn main() { if (match x { _ => true }) { } }").unwrap();
+        // A statement starting with `match` is the match statement, so a
+        // tail match-expression needs parens (same rule as `if`).
+        let p = parse_src("fn f(): int { (match x { _ => 1 }) }  fn main() { }").unwrap();
+        assert!(matches!(p.funcs[0].body.stmts[0], Stmt::Return { .. }));
+        assert!(parse_err("fn f(): int { match x { _ => 1 } }  fn main() { }")
+            .contains("expected '{'"));
+        // Pattern errors.
+        assert!(parse_err("fn main() { match x { A => { } } }").contains("expected '.'"));
+        assert!(parse_err("fn main() { match x { 1.5 => { } } }").contains("expected a pattern"));
+        assert!(parse_err("fn main() { match x { -x => { } } }")
+            .contains("expected an integer literal after '-'"));
+        assert!(parse_err("fn main() { match x { E.A(1) => { } } }")
+            .contains("expected identifier"));
+        assert!(parse_err("fn main() { let y = match x { 1 => 2 3 => 4 }; }")
+            .contains("expected '}'"));
     }
 
     #[test]
@@ -1066,7 +1353,7 @@ fn main() {
         assert!(parse_err(&unary).contains("nested too deeply"));
         let blocks = format!("fn main() {{ {} {} }}", "{".repeat(100_000), "}".repeat(100_000));
         assert!(parse_err(&blocks).contains("nested too deeply"));
-        let ty = format!("fn main() {{ let x: {}int{} = nil; }}", "[".repeat(100_000), "]".repeat(100_000));
+        let ty = format!("fn main() {{ let x: {}int{} = y; }}", "[".repeat(100_000), "]".repeat(100_000));
         assert!(parse_err(&ty).contains("nested too deeply"));
         // The depth counter unwinds correctly: deep-but-legal nesting in one
         // statement doesn't eat budget from the next.
@@ -1085,7 +1372,7 @@ fn main() {
         assert!(parse_err("fn main() { let x = ; }").contains("expected an expression"));
         assert!(parse_err("fn main() { let x: = 1; }").contains("expected a type"));
         assert!(parse_err("fn main() {").contains("expected '}'"));
-        assert!(parse_err("let x = 1;").contains("expected 'fn' or 'struct' at top level"));
+        assert!(parse_err("let x = 1;").contains("expected 'fn', 'struct', or 'enum' at top level"));
         assert!(parse_err("fn () {}").contains("expected identifier"));
         assert!(parse_err("fn main( {}").contains("expected identifier"));
         assert!(parse_err("struct P { x int }").contains("expected ':'"));

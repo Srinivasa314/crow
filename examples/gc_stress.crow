@@ -1,27 +1,31 @@
-struct Node { value: int, next: Node }
-struct Tree { left: Tree, right: Tree, key: int }
+struct Node { value: int, next: Option<Node> }
+
+enum Tree { Branch { left: Tree, right: Tree, key: int }, Leaf }
 
 fn build_list(n: int): Node {
-    let head: Node = nil;
-    for (let i = 0; i < n; i = i + 1) {
-        head = Node { value: i, next: head };
+    let head: Option<Node> = Option.None;
+    for (let i = 0; i < n - 1; i = i + 1) {
+        head = Option.Some(Node { value: i, next: head });
     }
-    return head;
+    return Node { value: n - 1, next: head };
 }
 
 fn checksum(list: Node): int {
-    let total = 0;
-    let cur = list;
-    while cur != nil {
-        total = total + cur.value;
-        cur = cur.next;
+    let total = list.value;
+    let cur = list.next;
+    let go = true;
+    while go {
+        match cur {
+            Option.Some(n) => { total = total + n.value; cur = n.next; }
+            Option.None => { go = false; }
+        }
     }
     return total;
 }
 
 fn build_tree(depth: int, key: int): Tree {
-    if depth == 0 { return nil; }
-    return Tree {
+    if depth == 0 { return Tree.Leaf; }
+    return Tree.Branch {
         left: build_tree(depth - 1, key * 2),
         right: build_tree(depth - 1, key * 2 + 1),
         key: key,
@@ -29,8 +33,12 @@ fn build_tree(depth: int, key: int): Tree {
 }
 
 fn tree_sum(t: Tree): int {
-    if t == nil { return 0; }
-    return t.key + tree_sum(t.left) + tree_sum(t.right);
+    match t {
+        Tree.Branch { left, right, key } => {
+            return key + tree_sum(left) + tree_sum(right);
+        }
+        Tree.Leaf => { return 0; }
+    }
 }
 
 fn main() {
@@ -41,7 +49,7 @@ fn main() {
         let garbage = build_list(100);
         assert(checksum(garbage) == 4950);
         // mutate old-gen objects to point at young objects (write barrier)
-        survivor.next = Node { value: i, next: survivor.next };
+        survivor.next = Option.Some(Node { value: i, next: survivor.next });
     }
     println(checksum(survivor) > 0);
 

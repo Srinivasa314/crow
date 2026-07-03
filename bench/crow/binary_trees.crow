@@ -1,10 +1,10 @@
-struct Tree { left: Tree, right: Tree, value: int }
+enum Tree { Branch { left: Tree, right: Tree, value: int }, Leaf }
 
 fn build(depth: int, value: int): Tree {
     if depth == 0 {
-        return Tree { left: nil, right: nil, value: value };
+        return Tree.Branch { left: Tree.Leaf, right: Tree.Leaf, value: value };
     }
-    Tree {
+    Tree.Branch {
         left: build(depth - 1, value * 2),
         right: build(depth - 1, value * 2 + 1),
         value: value,
@@ -12,8 +12,10 @@ fn build(depth: int, value: int): Tree {
 }
 
 fn sum(t: Tree): int {
-    if t == nil { return 0; }
-    t.value + sum(t.left) + sum(t.right)
+    match t {
+        Tree.Branch { left, right, value } => { return value + sum(left) + sum(right); }
+        Tree.Leaf => { return 0; }
+    }
 }
 
 fn main() {
@@ -23,4 +25,3 @@ fn main() {
     }
     println(total);
 }
-

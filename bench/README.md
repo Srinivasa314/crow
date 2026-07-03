@@ -26,9 +26,9 @@ Apple M1 (macOS, ARM64), Go 1.26.4, hyperfine mean of 10 runs:
 
 | Benchmark    | Crow   | Go     | Crow / Go |
 |--------------|--------|--------|-----------|
-| fib          | 191 ms | 134 ms | 1.43×     |
-| mandelbrot   | 50 ms  | 42 ms  | 1.19×     |
-| binary_trees | 127 ms | 106 ms | 1.20×     |
+| fib          | 190 ms | 133 ms | 1.43×     |
+| mandelbrot   | 49 ms  | 42 ms  | 1.17×     |
+| binary_trees | 129 ms | 106 ms | 1.22×     |
 
 ### Why fib lags the other two
 
@@ -45,6 +45,16 @@ unfused immediates). Crow's stack-overflow guard measures at ~1 ms —
 branch prediction hides it.
 
 mandelbrot (pure float loops, no checks involved) and binary_trees
-(allocation and GC; the adaptive nursery converges to 16 MiB for its
-working set) both sit around 1.2×, which is the current Cranelift-vs-Go
+(allocation and GC) both sit around 1.2×, the current Cranelift-vs-Go
 codegen baseline.
+
+### binary_trees and enum representation
+
+The tree is an enum with an inline field variant —
+`Branch { left: Tree, right: Tree, value: int }` — which stores its fields
+directly in the enum object's payload, so a node is one allocation and
+`Leaf` is a free static singleton. That matches Go's one nil-pointered
+node per allocation. Modeling the node as a variant *wrapping* a struct
+(`Branch(TreeData)`) instead costs two allocations per node and roughly
+doubles the runtime of this allocation-bound benchmark — worth knowing
+when modeling allocation-heavy data.

@@ -17,6 +17,8 @@ pub enum Tok {
     // Keywords
     Fn,
     Struct,
+    Enum,
+    Match,
     Let,
     If,
     Else,
@@ -27,7 +29,6 @@ pub enum Tok {
     Continue,
     True,
     False,
-    Nil,
     As,
     // Punctuation
     LParen,
@@ -40,6 +41,8 @@ pub enum Tok {
     Semi,
     Colon,
     Dot,
+    /// `=>`, separating a match arm's pattern from its body.
+    FatArrow,
     // Operators
     Plus,
     Minus,
@@ -77,6 +80,8 @@ impl fmt::Display for Tok {
             Tok::Ident(name) => return write!(f, "identifier '{name}'"),
             Tok::Fn => "'fn'",
             Tok::Struct => "'struct'",
+            Tok::Enum => "'enum'",
+            Tok::Match => "'match'",
             Tok::Let => "'let'",
             Tok::If => "'if'",
             Tok::Else => "'else'",
@@ -87,7 +92,6 @@ impl fmt::Display for Tok {
             Tok::Continue => "'continue'",
             Tok::True => "'true'",
             Tok::False => "'false'",
-            Tok::Nil => "'nil'",
             Tok::As => "'as'",
             Tok::LParen => "'('",
             Tok::RParen => "')'",
@@ -99,6 +103,7 @@ impl fmt::Display for Tok {
             Tok::Semi => "';'",
             Tok::Colon => "':'",
             Tok::Dot => "'.'",
+            Tok::FatArrow => "'=>'",
             Tok::Plus => "'+'",
             Tok::Minus => "'-'",
             Tok::Star => "'*'",
@@ -273,6 +278,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 let tok = match word {
                     "fn" => Tok::Fn,
                     "struct" => Tok::Struct,
+                    "enum" => Tok::Enum,
+                    "match" => Tok::Match,
                     "let" => Tok::Let,
                     "if" => Tok::If,
                     "else" => Tok::Else,
@@ -283,7 +290,6 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                     "continue" => Tok::Continue,
                     "true" => Tok::True,
                     "false" => Tok::False,
-                    "nil" => Tok::Nil,
                     "as" => Tok::As,
                     _ => Tok::Ident(word.to_string()),
                 };
@@ -380,6 +386,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             b'%' if bytes.get(i + 1) == Some(&b'=') => i += push(Tok::OpAssign(BinOp::Rem), 2),
             b'%' => i += push(Tok::Percent, 1),
             b'=' if bytes.get(i + 1) == Some(&b'=') => i += push(Tok::Eq, 2),
+            b'=' if bytes.get(i + 1) == Some(&b'>') => i += push(Tok::FatArrow, 2),
             b'=' => i += push(Tok::Assign, 1),
             b'!' if bytes.get(i + 1) == Some(&b'=') => i += push(Tok::Ne, 2),
             b'!' => i += push(Tok::Not, 1),
@@ -433,12 +440,12 @@ mod tests {
     #[test]
     fn keywords_and_identifiers() {
         assert_eq!(
-            toks("fn struct let if else while for return break continue true false nil as foo _bar x9"),
+            toks("fn struct enum match let if else while for return break continue true false as foo _bar x9"),
             vec![
-                Tok::Fn, Tok::Struct, Tok::Let, Tok::If, Tok::Else, Tok::While, Tok::For,
-                Tok::Return, Tok::Break, Tok::Continue, Tok::True, Tok::False, Tok::Nil,
-                Tok::As, Tok::Ident("foo".into()), Tok::Ident("_bar".into()),
-                Tok::Ident("x9".into()), Tok::Eof,
+                Tok::Fn, Tok::Struct, Tok::Enum, Tok::Match, Tok::Let, Tok::If, Tok::Else,
+                Tok::While, Tok::For, Tok::Return, Tok::Break, Tok::Continue, Tok::True,
+                Tok::False, Tok::As, Tok::Ident("foo".into()),
+                Tok::Ident("_bar".into()), Tok::Ident("x9".into()), Tok::Eof,
             ]
         );
     }
@@ -468,6 +475,10 @@ mod tests {
             Tok::OpAssign(BinOp::Div), Tok::OpAssign(BinOp::Rem), Tok::OpAssign(BinOp::BitAnd),
             Tok::OpAssign(BinOp::BitOr), Tok::OpAssign(BinOp::BitXor),
             Tok::OpAssign(BinOp::Shl), Tok::OpAssign(BinOp::Shr), Tok::Eof,
+        ]);
+        // `=>` is one token, distinct from `=` and `==`.
+        assert_eq!(toks("=> == = =>="), vec![
+            Tok::FatArrow, Tok::Eq, Tok::Assign, Tok::FatArrow, Tok::Assign, Tok::Eof,
         ]);
         // Maximal munch: `&&` beats `&`, `<<` beats `<`, `>>=` beats `>>`.
         assert_eq!(toks("a&&b"), vec![

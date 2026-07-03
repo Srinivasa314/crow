@@ -20,7 +20,7 @@
 
 use crate::ast::*;
 use crate::mono::{canonical, instantiate, shape_of, suffix, Shape};
-use crate::types::{layout_fields, IntKind, Type as CrowType};
+use crate::types::{layout_fields, IntKind, Type as CrowType, VariantPayload};
 use crate::typeck::Checked;
 use std::collections::HashMap;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -35,6 +35,12 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 const HEADER: i32 = 16;
 const FLAG_STATIC: i64 = 4;
 const KIND_STRUCT: u64 = 0;
+/// Enum objects keep their variant tag in the header's aux word (free for
+/// struct-kind objects), so a wrapping variant costs one payload slot and a
+/// bare variant none at all.
+const ENUM_TAG: i32 = 8;
+/// `None` is the second variant of the prelude `Option<T>`.
+const OPTION_NONE_TAG: i64 = 1;
 // Array object layout: { buf @16, len @24, cap @32 } (see runtime).
 const ARR_BUF: i32 = HEADER;
 const ARR_LEN: i32 = HEADER + 8;
@@ -74,6 +80,8 @@ pub fn compile(program: &Program, checked: &Checked) -> Result<Vec<u8>, String> 
         fnval_ids: Vec::new(),
         inst_ids: HashMap::new(),
         struct_insts: HashMap::new(),
+        variant_singletons: HashMap::new(),
+        variant_insts: HashMap::new(),
         desc_cache: HashMap::new(),
         worklist: Vec::new(),
         closure0_desc: None,
@@ -143,6 +151,12 @@ fn collect_lambdas(block: &Block) -> Vec<&LambdaDef> {
             }
             Stmt::Return { value: Some(v), .. } => walk_expr(v, out),
             Stmt::Block(b) => walk_block(b, out),
+            Stmt::Match { scrutinee, arms, .. } => {
+                walk_expr(scrutinee, out);
+                for (_, b) in arms {
+                    walk_block(b, out);
+                }
+            }
             Stmt::Return { value: None, .. } | Stmt::Break(_) | Stmt::Continue(_) => {}
         }
     }
@@ -185,6 +199,21 @@ fn collect_lambdas(block: &Block) -> Vec<&LambdaDef> {
                     walk_expr(v, out);
                 }
             }
+            ExprKind::VariantLit { args, .. } => match args {
+                VariantArgs::Bare => {}
+                VariantArgs::Single(a) => walk_expr(a, out),
+                VariantArgs::Fields(fields) => {
+                    for (_, v, _) in fields {
+                        walk_expr(v, out);
+                    }
+                }
+            },
+            ExprKind::Match { scrutinee, arms } => {
+                walk_expr(scrutinee, out);
+                for (_, body) in arms {
+                    walk_expr(body, out);
+                }
+            }
             ExprKind::Lambda(lam) => {
                 out.push(lam);
                 walk_block(&lam.body, out);
@@ -224,12 +253,12 @@ enum Rt {
     ArrayPush,
     ArrayPop,
     PanicBounds,
-    PanicNull,
     PanicDiv,
     PanicOverflow,
     PanicShift,
     PanicCast,
     PanicStack,
+    PanicUnwrap,
     AssertFail,
 }
 
@@ -263,12 +292,12 @@ const RT_FUNCS: &[(Rt, &str, &[u8], Option<u8>)] = &[
     (Rt::ArrayPush, "crow_array_push", &[I, I, I, I], None),
     (Rt::ArrayPop, "crow_array_pop", &[I, I], Some(I)),
     (Rt::PanicBounds, "crow_panic_bounds", &[I, I, I], None),
-    (Rt::PanicNull, "crow_panic_null", &[I], None),
     (Rt::PanicDiv, "crow_panic_div", &[I], None),
     (Rt::PanicOverflow, "crow_panic_overflow", &[I], None),
     (Rt::PanicShift, "crow_panic_shift", &[I], None),
     (Rt::PanicCast, "crow_panic_cast", &[I], None),
     (Rt::PanicStack, "crow_panic_stack", &[I], None),
+    (Rt::PanicUnwrap, "crow_panic_unwrap", &[I], None),
     (Rt::AssertFail, "crow_assert_fail", &[I], None),
 ];
 
@@ -307,6 +336,13 @@ struct Codegen<'a> {
     inst_ids: HashMap<(u32, Vec<Shape>), FuncId>,
     /// Struct layouts + descriptors, keyed by (struct id, arg shapes).
     struct_insts: HashMap<(u32, Vec<Shape>), StructInst>,
+    /// Static singleton objects for bare enum variants, keyed by
+    /// (enum id, tag). Bare variants carry no payload, so one singleton
+    /// serves every instantiation of a generic enum.
+    variant_singletons: HashMap<(u32, u32), DataId>,
+    /// Payload layouts + descriptors of wrapping variants, keyed by
+    /// (enum id, tag, arg shapes) — the enum analog of `struct_insts`.
+    variant_insts: HashMap<(u32, u32, Vec<Shape>), StructInst>,
     /// Descriptors are pure (kind, size, refmap) data, so every object shape
     /// shares one descriptor no matter which struct, closure, or generic
     /// instantiation produced it.
@@ -417,6 +453,42 @@ impl<'a> Codegen<'a> {
         let desc = self.desc(KIND_STRUCT, payload_size as u64, refmap)?;
         let si = StructInst { offsets, desc };
         self.struct_insts.insert(key, si.clone());
+        Ok(si)
+    }
+
+    /// Payload layout + descriptor of one wrapping-variant instantiation.
+    /// A single-value variant is a one-field layout; inline fields pack
+    /// exactly like struct fields, with the tag staying in the aux word.
+    fn variant_inst(
+        &mut self,
+        eid: u32,
+        tag: u32,
+        targs: &[CrowType],
+    ) -> Result<StructInst, String> {
+        let key = (eid, tag, targs.iter().map(shape_of).collect::<Vec<_>>());
+        if let Some(si) = self.variant_insts.get(&key) {
+            return Ok(si.clone());
+        }
+        let canon: Vec<CrowType> = key.2.iter().map(|s| canonical(*s)).collect();
+        let ftys: Vec<CrowType> = match &self.checked.enums[eid as usize].variants
+            [tag as usize]
+            .1
+        {
+            VariantPayload::Bare => Vec::new(),
+            VariantPayload::Single(t) => vec![t.subst(&canon)],
+            VariantPayload::Fields(fs) => fs.iter().map(|(_, t)| t.subst(&canon)).collect(),
+        };
+        let (offsets, payload_size) = layout_fields(&ftys);
+        let mut refmap = 0u64;
+        for (j, ty) in ftys.iter().enumerate() {
+            if ty.is_ref() {
+                debug_assert_eq!(offsets[j] % 8, 0);
+                refmap |= 1 << (offsets[j] / 8);
+            }
+        }
+        let desc = self.desc(KIND_STRUCT, payload_size as u64, refmap)?;
+        let si = StructInst { offsets, desc };
+        self.variant_insts.insert(key, si.clone());
         Ok(si)
     }
 
@@ -657,7 +729,6 @@ impl<'a> Codegen<'a> {
             env_var,
             loop_stack: Vec::new(),
             terminated: false,
-            ret: ret.clone(),
             lam_ids,
         };
 
@@ -801,6 +872,33 @@ impl<'a> Codegen<'a> {
         Ok(())
     }
 
+    /// The static singleton object for a bare enum variant: a pre-built,
+    /// payloadless enum object with its tag in the aux word, `STATIC` so the
+    /// GC never moves or frees it (like string literals). Constructing a
+    /// bare variant is just taking this object's address, and for bare-only
+    /// enums it makes identity comparison structural.
+    fn variant_singleton(&mut self, eid: u32, tag: u32) -> Result<DataId, String> {
+        if let Some(&id) = self.variant_singletons.get(&(eid, tag)) {
+            return Ok(id);
+        }
+        let desc = self.desc(KIND_STRUCT, 0, 0)?;
+        let name = format!("crow_variant.{}.{tag}", self.checked.enums[eid as usize].name);
+        let id = self
+            .module
+            .declare_data(&name, Linkage::Local, true, false)
+            .map_err(|e| e.to_string())?;
+        let mut d = DataDescription::new();
+        let mut bytes = vec![0u8; 16];
+        bytes[8..16].copy_from_slice(&(tag as u64).to_le_bytes());
+        d.define(bytes.into_boxed_slice());
+        d.set_align(16);
+        let gv = self.module.declare_data_in_data(desc, &mut d);
+        d.write_data_addr(0, gv, FLAG_STATIC);
+        self.module.define_data(id, &d).map_err(|e| e.to_string())?;
+        self.variant_singletons.insert((eid, tag), id);
+        Ok(id)
+    }
+
     /// Define a string literal as a static, pre-built heap object.
     fn define_string_literal(&mut self, s: &str) -> Result<DataId, String> {
         let n = self.str_count;
@@ -847,13 +945,23 @@ fn makes_crow_calls(block: &Block) -> bool {
             }
             ExprKind::Builtin(_, args) | ExprKind::ArrayLit(args) => args.iter().any(in_expr),
             ExprKind::StructLit { fields, .. } => fields.iter().any(|(_, v, _)| in_expr(v)),
+            ExprKind::VariantLit { args, .. } => match args {
+                VariantArgs::Bare => false,
+                VariantArgs::Single(a) => in_expr(a),
+                VariantArgs::Fields(fields) => fields.iter().any(|(_, v, _)| in_expr(v)),
+            },
+            ExprKind::VariantStructLit { fields, .. } => {
+                fields.iter().any(|(_, v, _)| in_expr(v))
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                in_expr(scrutinee) || arms.iter().any(|(_, body)| in_expr(body))
+            }
             ExprKind::Lambda(_)
             | ExprKind::Int(_)
             | ExprKind::Byte(_)
             | ExprKind::Float(_)
             | ExprKind::Bool(_)
             | ExprKind::Str(_)
-            | ExprKind::Nil
             | ExprKind::Var { .. } => false,
         }
     }
@@ -877,6 +985,9 @@ fn makes_crow_calls(block: &Block) -> bool {
             Stmt::Return { value, .. } => value.as_ref().is_some_and(in_expr),
             Stmt::Break(_) | Stmt::Continue(_) => false,
             Stmt::Block(b) => makes_crow_calls(b),
+            Stmt::Match { scrutinee, arms, .. } => {
+                in_expr(scrutinee) || arms.iter().any(|(_, b)| makes_crow_calls(b))
+            }
         }
     }
     block.stmts.iter().any(in_stmt)
@@ -899,7 +1010,6 @@ struct FnCompiler<'a, 'b> {
     /// (break target, continue target)
     loop_stack: Vec<(IrBlock, IrBlock)>,
     terminated: bool,
-    ret: CrowType,
     /// (function, descriptor) of every lambda in the current instantiation,
     /// keyed by the checker-assigned lambda id.
     lam_ids: &'a HashMap<u32, (FuncId, DataId)>,
@@ -946,11 +1056,6 @@ impl FnCompiler<'_, '_> {
         self.b.ins().iconst(types::I64, line as i64)
     }
 
-    fn null_check(&mut self, ptr: Value, line: u32) {
-        let is_null = self.b.ins().icmp_imm(IntCC::Equal, ptr, 0);
-        self.panic_if(is_null, Rt::PanicNull, line);
-    }
-
     /// Branch to a panic call when `cond` is true, then continue.
     fn panic_if(&mut self, cond: Value, rt: Rt, line: u32) {
         let panic_blk = self.b.create_block();
@@ -974,6 +1079,16 @@ impl FnCompiler<'_, '_> {
     /// A struct field's concrete type in the instantiation named by `targs`.
     fn field_ty(&self, sid: u32, targs: &[CrowType], index: u32) -> CrowType {
         self.cg.checked.structs[sid as usize].fields[index as usize].1.subst(targs)
+    }
+
+    /// A variant payload slot's concrete type in the instantiation named by
+    /// `targs` (index 0 for a single-value variant).
+    fn variant_field_ty(&self, eid: u32, tag: u32, index: usize, targs: &[CrowType]) -> CrowType {
+        match &self.cg.checked.enums[eid as usize].variants[tag as usize].1 {
+            VariantPayload::Single(t) => t.subst(targs),
+            VariantPayload::Fields(fs) => fs[index].1.subst(targs),
+            VariantPayload::Bare => unreachable!("bare variants have no payload"),
+        }
     }
 
     fn small_ty(k: IntKind) -> types::Type {
@@ -1069,8 +1184,6 @@ impl FnCompiler<'_, '_> {
                         None => {
                             let val = self.gen_expr(value)?;
                             let obj_cv = self.gen_expr(obj)?;
-                            let obj_v = self.value_of(obj_cv);
-                            self.null_check(obj_v, *line);
                             (obj_cv, self.value_of(val))
                         }
                         Some(op) => {
@@ -1078,7 +1191,6 @@ impl FnCompiler<'_, '_> {
                             // field read before the right-hand side runs.
                             let obj_cv = self.gen_expr(obj)?;
                             let obj_v = self.value_of(obj_cv);
-                            self.null_check(obj_v, *line);
                             let cur = self.load_typed(&fty, obj_v, off);
                             if fty.is_ref() {
                                 self.root(cur);
@@ -1116,7 +1228,6 @@ impl FnCompiler<'_, '_> {
                             let arr_cv = self.gen_expr(arr)?;
                             let idx_v = self.gen_scalar(idx)?;
                             let arr_v = self.value_of(arr_cv);
-                            self.null_check(arr_v, *line);
                             let elem_size = elem_ty.size_bytes();
                             let (_, addr) =
                                 self.index_addr_checked(arr_v, idx_v, elem_size, *line);
@@ -1235,10 +1346,7 @@ impl FnCompiler<'_, '_> {
                 match value {
                     Some(v) => {
                         let cv = self.gen_expr(v)?;
-                        let mut rv = self.value_of(cv);
-                        if v.ty == CrowType::Nil && self.ret == CrowType::Float {
-                            rv = self.b.ins().f64const(0.0); // unreachable in practice
-                        }
+                        let rv = self.value_of(cv);
                         self.b.ins().return_(&[rv]);
                     }
                     None => {
@@ -1258,6 +1366,98 @@ impl FnCompiler<'_, '_> {
                 self.terminated = true;
             }
             Stmt::Block(b) => self.gen_block(b)?,
+            Stmt::Match { scrutinee, arms, .. } => {
+                let pats: Vec<&Pattern> = arms.iter().map(|(p, _)| p).collect();
+                let (scrut_v, blocks) = self.gen_match_dispatch(scrutinee, &pats)?;
+                let merge = self.b.create_block();
+                let mut all_terminated = true;
+                for ((pat, body), blk) in arms.iter().zip(&blocks) {
+                    self.b.switch_to_block(*blk);
+                    self.terminated = false;
+                    self.bind_pattern(pat, scrut_v, &scrutinee.ty)?;
+                    self.gen_block(body)?;
+                    if !self.terminated {
+                        self.b.ins().jump(merge, &[]);
+                    }
+                    all_terminated &= self.terminated;
+                }
+                self.b.switch_to_block(merge);
+                self.terminated = all_terminated;
+                if self.terminated {
+                    // Merge block is unreachable; keep IR valid.
+                    self.b.ins().trap(TrapCode::user(1).unwrap());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Evaluate a match scrutinee and emit the dispatch chain: one entry
+    /// block per arm, reached when that arm's pattern matches. The last arm
+    /// is the fallthrough — sound because the checker enforced
+    /// exhaustiveness. Returns the scrutinee value (for payload binding in
+    /// the arms; no safepoint intervenes before the arm prologues) and the
+    /// arm blocks in source order.
+    fn gen_match_dispatch(
+        &mut self,
+        scrutinee: &Expr,
+        pats: &[&Pattern],
+    ) -> Result<(Value, Vec<IrBlock>), String> {
+        let scrut_cv = self.gen_expr(scrutinee)?;
+        let scrut_v = self.value_of(scrut_cv);
+        // Enums dispatch on the tag in the aux word; scalars on their value.
+        let disc = if scrutinee.ty.is_ref() {
+            self.b.ins().load(types::I64, MemFlags::trusted(), scrut_v, ENUM_TAG)
+        } else {
+            scrut_v
+        };
+        let blocks: Vec<IrBlock> = pats.iter().map(|_| self.b.create_block()).collect();
+        for (i, pat) in pats.iter().enumerate() {
+            if i == pats.len() - 1 {
+                self.b.ins().jump(blocks[i], &[]);
+                break;
+            }
+            let want = match pat {
+                Pattern::Variant { tag, .. } => *tag as u64,
+                Pattern::IntLit { value, .. } => *value,
+                Pattern::ByteLit { value, .. } => *value as u64,
+                Pattern::BoolLit { value, .. } => *value as u64,
+                Pattern::Wildcard { .. } => unreachable!("checker keeps '_' last"),
+            };
+            let want_v = self.b.ins().iconst(types::I64, want as i64);
+            let hit = self.b.ins().icmp(IntCC::Equal, disc, want_v);
+            let next = self.b.create_block();
+            self.b.ins().brif(hit, blocks[i], &[], next, &[]);
+            self.b.switch_to_block(next);
+        }
+        Ok((scrut_v, blocks))
+    }
+
+    /// Arm prologue: load the matched variant's payload into the binder
+    /// locals, before any arm code (and thus any safepoint) runs.
+    fn bind_pattern(
+        &mut self,
+        pat: &Pattern,
+        scrut_v: Value,
+        scrut_ty: &CrowType,
+    ) -> Result<(), String> {
+        let Pattern::Variant { args, tag, .. } = pat else { return Ok(()) };
+        let (eid, targs) = match scrut_ty {
+            CrowType::Enum(id, a) => (*id, a.clone()),
+            _ => unreachable!("variant patterns require an enum scrutinee"),
+        };
+        let binds: Vec<(&PatBinder, usize)> = match args {
+            PatArgs::Bare => return Ok(()),
+            PatArgs::Single(b) => vec![(b, 0)],
+            PatArgs::Fields(fields) => {
+                fields.iter().map(|(_, b, i)| (b, *i as usize)).collect()
+            }
+        };
+        let si = self.cg.variant_inst(eid, *tag, &targs)?;
+        for (b, index) in binds {
+            let off = HEADER + si.offsets[index] as i32;
+            let v = self.load_typed(&b.ty.clone(), scrut_v, off);
+            self.assign_local(b.local, CV::Scalar(v));
         }
         Ok(())
     }
@@ -1291,7 +1491,6 @@ impl FnCompiler<'_, '_> {
                 let gv = self.cg.module.declare_data_in_func(data_id, self.b.func);
                 CV::Scalar(self.b.ins().global_value(types::I64, gv))
             }
-            ExprKind::Nil => CV::Scalar(self.b.ins().iconst(types::I64, 0)),
             ExprKind::Var { res, .. } => match res.unwrap() {
                 VarRes::Local(idx) => {
                     CV::Scalar(self.b.use_var(self.local_repr[idx as usize]))
@@ -1380,7 +1579,6 @@ impl FnCompiler<'_, '_> {
                     let cvs: Vec<CV> =
                         args.iter().map(|a| self.gen_expr(a)).collect::<Result<_, _>>()?;
                     let fval = self.value_of(f_cv);
-                    self.null_check(fval, line);
                     let fnptr = self.b.ins().load(types::I64, MemFlags::trusted(), fval, HEADER);
                     let mut vals = vec![fval];
                     for cv in &cvs {
@@ -1401,7 +1599,6 @@ impl FnCompiler<'_, '_> {
             ExprKind::Field { obj, index, .. } => {
                 let obj_cv = self.gen_expr(obj)?;
                 let obj_v = self.value_of(obj_cv);
-                self.null_check(obj_v, line);
                 let (sid, targs) = match &obj.ty {
                     CrowType::Struct(s, a) => (*s, a.clone()),
                     _ => unreachable!("checker validated field access"),
@@ -1420,7 +1617,6 @@ impl FnCompiler<'_, '_> {
                     let s_cv = self.gen_expr(arr)?;
                     let idx_v = self.gen_scalar(idx)?;
                     let s_v = self.value_of(s_cv);
-                    self.null_check(s_v, line);
                     let len = self.b.ins().load(types::I64, MemFlags::trusted(), s_v, 8);
                     self.bounds_check(idx_v, len, line);
                     let base = self.b.ins().iadd(s_v, idx_v);
@@ -1490,6 +1686,77 @@ impl FnCompiler<'_, '_> {
                 }
                 obj_cv
             }
+            ExprKind::VariantStructLit { .. } => {
+                unreachable!("rewritten into VariantLit by the checker")
+            }
+            ExprKind::VariantLit { args, enum_id, tag } => {
+                match args {
+                    // Bare variant: the address of its static singleton.
+                    // Static objects never move or die, so no root needed.
+                    VariantArgs::Bare => {
+                        let data_id = self.cg.variant_singleton(*enum_id, *tag)?;
+                        let gv = self.cg.module.declare_data_in_func(data_id, self.b.func);
+                        CV::Scalar(self.b.ins().global_value(types::I64, gv))
+                    }
+                    // Wrapping variant: allocate with the tag in the aux
+                    // word and store the payload slot(s) — inline fields
+                    // pack in the enum object itself, so this is a single
+                    // allocation no matter the field count.
+                    VariantArgs::Single(_) | VariantArgs::Fields(_) => {
+                        let targs = match &e.ty {
+                            CrowType::Enum(_, a) => a.clone(),
+                            _ => unreachable!("checker typed variant literals"),
+                        };
+                        let si = self.cg.variant_inst(*enum_id, *tag, &targs)?;
+                        let values: Vec<(&Expr, usize)> = match args {
+                            VariantArgs::Single(a) => vec![(&**a, 0)],
+                            VariantArgs::Fields(fields) => fields
+                                .iter()
+                                .map(|(_, v, i)| (v, *i as usize))
+                                .collect(),
+                            VariantArgs::Bare => unreachable!(),
+                        };
+                        let gv = self.cg.module.declare_data_in_func(si.desc, self.b.func);
+                        let desc = self.b.ins().global_value(types::I64, gv);
+                        let tag_v = self.b.ins().iconst(types::I64, *tag as i64);
+                        let obj = self.call_rt(Rt::Alloc, &[desc, tag_v]).unwrap();
+                        let obj_cv = self.root(obj);
+                        for (value, index) in values {
+                            let fty = self.variant_field_ty(*enum_id, *tag, index, &targs);
+                            let off = HEADER + si.offsets[index] as i32;
+                            let cv = self.gen_expr(value)?;
+                            let v = self.value_of(cv);
+                            let obj_v = self.value_of(obj_cv);
+                            if fty.is_ref() {
+                                let addr = self.b.ins().iadd_imm(obj_v, off as i64);
+                                self.call_rt(Rt::WriteRef, &[obj_v, addr, v]);
+                            } else {
+                                self.store_typed(&fty, v, obj_v, off);
+                            }
+                        }
+                        obj_cv
+                    }
+                }
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                let pats: Vec<&Pattern> = arms.iter().map(|(p, _)| p).collect();
+                let (scrut_v, blocks) = self.gen_match_dispatch(scrutinee, &pats)?;
+                let merge = self.b.create_block();
+                self.b.append_block_param(merge, abi_ty(&e.ty));
+                for ((pat, body), blk) in arms.iter().zip(&blocks) {
+                    self.b.switch_to_block(*blk);
+                    self.bind_pattern(pat, scrut_v, &scrutinee.ty)?;
+                    let v = self.gen_scalar(body)?;
+                    self.b.ins().jump(merge, &[v.into()]);
+                }
+                self.b.switch_to_block(merge);
+                let r = self.b.block_params(merge)[0];
+                if e.ty.is_ref() {
+                    self.root(r)
+                } else {
+                    CV::Scalar(r)
+                }
+            }
             ExprKind::Lambda(lam) => {
                 let (lam_func, lam_desc) = self.lam_ids[&lam.id];
                 let gv = self.cg.module.declare_data_in_func(lam_desc, self.b.func);
@@ -1551,7 +1818,6 @@ impl FnCompiler<'_, '_> {
         let arr_cv = self.gen_expr(arr)?;
         let idx_v = self.gen_scalar(idx)?;
         let arr_v = self.value_of(arr_cv);
-        self.null_check(arr_v, line);
         let elem_size = match &arr.ty {
             CrowType::Array(t) => t.size_bytes(),
             _ => unreachable!("checker validated index targets"),
@@ -1613,7 +1879,7 @@ impl FnCompiler<'_, '_> {
 
         // String equality goes through the runtime; concatenation shares
         // `gen_arith_values` with compound assignment.
-        if operand_ty == CrowType::Str || rhs.ty == CrowType::Str {
+        if operand_ty == CrowType::Str {
             let l_cv = self.gen_expr(lhs)?;
             let r_cv = self.gen_expr(rhs)?;
             let lv = self.value_of(l_cv);
@@ -1633,10 +1899,10 @@ impl FnCompiler<'_, '_> {
             return Ok(CV::Scalar(result));
         }
 
-        // Reference equality (struct/array/fn identity, nil comparisons).
-        if matches!(op, BinOp::Eq | BinOp::Ne)
-            && (operand_ty.is_ref() || rhs.ty.is_ref())
-        {
+        // Reference equality: struct/array/fn identity; bare-only enums,
+        // whose variants are shared singletons, get structural equality
+        // from the same instruction.
+        if matches!(op, BinOp::Eq | BinOp::Ne) && operand_ty.is_ref() {
             let l_cv = self.gen_expr(lhs)?;
             let r_cv = self.gen_expr(rhs)?;
             let lv = self.value_of(l_cv);
@@ -1700,8 +1966,6 @@ impl FnCompiler<'_, '_> {
     ) -> Value {
         if *ty == CrowType::Str {
             debug_assert_eq!(op, BinOp::Add, "checker restricted string arithmetic to '+'");
-            self.null_check(lv, line);
-            self.null_check(rv, line);
             let v = self.call_rt(Rt::StrConcat, &[lv, rv]).unwrap();
             self.root(v);
             return v;
@@ -1916,7 +2180,6 @@ impl FnCompiler<'_, '_> {
                 let cv = self.gen_expr(arg)?;
                 let v = self.value_of(cv);
                 if arg.ty == CrowType::Str {
-                    self.null_check(v, line);
                 }
                 match arg.ty {
                     CrowType::Int(k) if k.signed() => self.call_rt(Rt::PrintInt, &[v]),
@@ -1934,7 +2197,6 @@ impl FnCompiler<'_, '_> {
                 let arg = &args[0];
                 let cv = self.gen_expr(arg)?;
                 let v = self.value_of(cv);
-                self.null_check(v, line);
                 let off = if arg.ty == CrowType::Str { 8 } else { ARR_LEN };
                 let len = self.b.ins().load(types::I64, MemFlags::trusted(), v, off);
                 CV::Scalar(len)
@@ -1947,7 +2209,6 @@ impl FnCompiler<'_, '_> {
                 let arr_cv = self.gen_expr(&args[0])?;
                 let val_cv = self.gen_expr(&args[1])?;
                 let arr_v = self.value_of(arr_cv);
-                self.null_check(arr_v, line);
                 let mut v = self.value_of(val_cv);
                 if elem_ty == CrowType::Float {
                     v = self.b.ins().bitcast(types::I64, MemFlags::new(), v);
@@ -1964,7 +2225,6 @@ impl FnCompiler<'_, '_> {
                 };
                 let arr_cv = self.gen_expr(&args[0])?;
                 let arr_v = self.value_of(arr_cv);
-                self.null_check(arr_v, line);
                 let elem_size = self.b.ins().iconst(types::I64, elem_ty.size_bytes() as i64);
                 let raw = self.call_rt(Rt::ArrayPop, &[arr_v, elem_size]).unwrap();
                 if elem_ty.is_ref() {
@@ -2014,7 +2274,6 @@ impl FnCompiler<'_, '_> {
             Builtin::Stoi | Builtin::Stof => {
                 let cv = self.gen_expr(&args[0])?;
                 let v = self.value_of(cv);
-                self.null_check(v, line);
                 let l = self.line_const(line);
                 let rt = if b == Builtin::Stoi { Rt::Stoi } else { Rt::Stof };
                 CV::Scalar(self.call_rt(rt, &[v, l]).unwrap())
@@ -2022,14 +2281,12 @@ impl FnCompiler<'_, '_> {
             Builtin::Stob => {
                 let cv = self.gen_expr(&args[0])?;
                 let v = self.value_of(cv);
-                self.null_check(v, line);
                 let arr = self.call_rt(Rt::Stob, &[v]).unwrap();
                 self.root(arr)
             }
             Builtin::Btos => {
                 let cv = self.gen_expr(&args[0])?;
                 let v = self.value_of(cv);
-                self.null_check(v, line);
                 let l = self.line_const(line);
                 let s = self.call_rt(Rt::Btos, &[v, l]).unwrap();
                 self.root(s)
@@ -2049,6 +2306,23 @@ impl FnCompiler<'_, '_> {
                 let full = self.b.ins().iconst(types::I64, 1);
                 self.call_rt(Rt::GcCollect, &[full]);
                 CV::Unit
+            }
+            Builtin::Unwrap => {
+                let pty = match &args[0].ty {
+                    CrowType::Enum(_, targs) => targs[0].clone(),
+                    _ => unreachable!("checker restricted unwrap to Option"),
+                };
+                let cv = self.gen_expr(&args[0])?;
+                let v = self.value_of(cv);
+                let tag = self.b.ins().load(types::I64, MemFlags::trusted(), v, ENUM_TAG);
+                let is_none = self.b.ins().icmp_imm(IntCC::Equal, tag, OPTION_NONE_TAG);
+                self.panic_if(is_none, Rt::PanicUnwrap, line);
+                let raw = self.load_typed(&pty, v, HEADER);
+                if pty.is_ref() {
+                    self.root(raw)
+                } else {
+                    CV::Scalar(raw)
+                }
             }
         })
     }
@@ -2093,7 +2367,7 @@ fn main() {
     let p = Pair { a: "u", b: "v" };
     let q = Pair { a: a, b: a };
     let r = Pair { a: 1, b: 2 };
-    assert(a != nil && b != nil && p != nil && q != nil && r != nil);
+    assert(a == a && b == b && p == p && q == q && r == r);
 }
 "#,
         );
@@ -2104,6 +2378,32 @@ fn main() {
                 "crow_desc.k0s16r1", // A and B: ref word + scalar word
                 "crow_desc.k0s16r3", // Pair<string> and Pair<A>: two ref words
                 "crow_desc.k0s8r0",  // static closure objects (crow_fnval)
+            ]
+        );
+    }
+
+    /// Enum objects reuse the same shape-keyed descriptors: bare-variant
+    /// singletons share one empty descriptor, and every scalar-wrapping
+    /// (or ref-wrapping) variant of every enum shares one one-slot
+    /// descriptor — the scalar one is even shared with static closures.
+    #[test]
+    fn enum_descriptors_dedupe_by_shape() {
+        let syms = desc_symbols(
+            r#"
+enum Color { Red, Green }
+enum Num { I(int), F(float), S(string), C(Color) }
+fn main() {
+    let xs = [Num.I(1), Num.F(2.0), Num.S("x"), Num.C(Color.Red)];
+    match xs[3] { Num.C(c) => { assert(c != Color.Green); } _ => { } }
+}
+"#,
+        );
+        assert_eq!(
+            syms,
+            vec![
+                "crow_desc.k0s0r0", // Color.Red / Color.Green singletons
+                "crow_desc.k0s8r0", // Num.I, Num.F, and crow_fnval closures
+                "crow_desc.k0s8r1", // Num.S and Num.C (any ref payload)
             ]
         );
     }

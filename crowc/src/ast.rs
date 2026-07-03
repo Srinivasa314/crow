@@ -6,6 +6,7 @@ use crate::types::Type;
 #[derive(Debug)]
 pub struct Program {
     pub structs: Vec<StructDef>,
+    pub enums: Vec<EnumDef>,
     pub funcs: Vec<FuncDef>,
 }
 
@@ -15,6 +16,22 @@ pub struct StructDef {
     pub type_params: Vec<String>,
     pub fields: Vec<(String, TypeExpr)>,
     pub line: u32,
+}
+
+#[derive(Debug)]
+pub struct EnumDef {
+    pub name: String,
+    pub type_params: Vec<String>,
+    pub variants: Vec<(String, VariantPayloadExpr)>,
+    pub line: u32,
+}
+
+/// Syntactic variant payload: bare, `(type)`, or `{ name: type, ... }`.
+#[derive(Debug)]
+pub enum VariantPayloadExpr {
+    Bare,
+    Single(TypeExpr),
+    Fields(Vec<(String, TypeExpr)>),
 }
 
 /// `Clone` exists on function bodies so codegen can instantiate a generic
@@ -89,6 +106,72 @@ pub enum Stmt {
     Break(u32),
     Continue(u32),
     Block(Block),
+    /// `match expr { pat => { ... }, ... }` in statement position; arms are
+    /// blocks and must be exhaustive.
+    Match {
+        scrutinee: Expr,
+        arms: Vec<(Pattern, Block)>,
+        line: u32,
+    },
+}
+
+/// A match pattern. One constructor deep: a qualified enum variant with its
+/// payload binders, a literal, or the wildcard.
+#[derive(Debug, Clone)]
+pub enum Pattern {
+    /// `Enum.Variant`, `Enum.Variant(binder)`, or
+    /// `Enum.Variant { field: binder, ... }`.
+    Variant {
+        enum_name: String,
+        variant: String,
+        args: PatArgs,
+        /// Variant tag (declaration index), set by the checker.
+        tag: u32,
+        line: u32,
+    },
+    /// Integer literal, optionally negated. `value` is the canonical
+    /// two's-complement pattern, folded by the checker at the scrutinee type.
+    IntLit {
+        neg: bool,
+        digits: u64,
+        value: u64,
+        line: u32,
+    },
+    /// `b'X'` byte literal; requires a u8 scrutinee.
+    ByteLit { value: u8, line: u32 },
+    BoolLit { value: bool, line: u32 },
+    Wildcard { line: u32 },
+}
+
+/// How a variant pattern binds the payload; must mirror the variant's
+/// declaration shape.
+#[derive(Debug, Clone)]
+pub enum PatArgs {
+    Bare,
+    Single(PatBinder),
+    /// (field name, binder, field index set by the checker). Every declared
+    /// field must appear; bind a field to `_` to ignore it.
+    Fields(Vec<(String, PatBinder, u32)>),
+}
+
+impl PatArgs {
+    pub fn binders_mut(&mut self) -> Vec<&mut PatBinder> {
+        match self {
+            PatArgs::Bare => Vec::new(),
+            PatArgs::Single(b) => vec![b],
+            PatArgs::Fields(fs) => fs.iter_mut().map(|(_, b, _)| b).collect(),
+        }
+    }
+}
+
+/// One payload binding of a variant pattern, scoped to its arm.
+#[derive(Debug, Clone)]
+pub struct PatBinder {
+    pub name: String,
+    /// Local index, assigned by the checker.
+    pub local: u32,
+    /// Bound value's type in the scrutinee's instantiation, set by the checker.
+    pub ty: Type,
 }
 
 #[derive(Debug, Clone)]
@@ -188,6 +271,7 @@ pub enum Builtin {
     Btos,
     Assert,
     GcCollect,
+    Unwrap,
 }
 
 #[derive(Debug, Clone)]
@@ -221,7 +305,6 @@ pub enum ExprKind {
     Float(f64),
     Bool(bool),
     Str(String),
-    Nil,
     Var {
         name: String,
         res: Option<VarRes>,
@@ -263,5 +346,39 @@ pub enum ExprKind {
         fields: Vec<(String, Expr, u32)>,
         struct_id: u32,
     },
+    /// `Enum.Variant { field: value, ... }`: construction of an
+    /// inline-fields variant. Unlike the bare/single forms this is
+    /// syntactically unambiguous, so the parser produces it directly (the
+    /// enum name resolves in the type namespace, like a struct literal);
+    /// the checker rewrites it into `VariantLit`.
+    VariantStructLit {
+        enum_name: String,
+        variant: String,
+        /// (field name, value, resolved field index)
+        fields: Vec<(String, Expr, u32)>,
+    },
+    /// A checked enum variant construction. Parsed as field access / call
+    /// (or `VariantStructLit`) and rewritten into this by the checker.
+    VariantLit {
+        args: VariantArgs,
+        enum_id: u32,
+        /// The variant's declaration index, which is also its runtime tag.
+        tag: u32,
+    },
+    /// `match expr { pat => expr, ... }` in expression position; arms are
+    /// single expressions of one common type and must be exhaustive.
+    Match {
+        scrutinee: Box<Expr>,
+        arms: Vec<(Pattern, Expr)>,
+    },
     Lambda(Box<LambdaDef>),
+}
+
+/// A checked variant construction's payload values.
+#[derive(Debug, Clone)]
+pub enum VariantArgs {
+    Bare,
+    Single(Box<Expr>),
+    /// (field name, value, resolved field index)
+    Fields(Vec<(String, Expr, u32)>),
 }

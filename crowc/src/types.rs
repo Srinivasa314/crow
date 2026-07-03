@@ -91,11 +91,11 @@ pub enum Type {
     Float,
     Bool,
     Str,
-    /// The type of the `nil` literal; unifies with any reference type.
-    Nil,
     /// Struct definition id plus type arguments (empty for a non-generic
     /// struct).
     Struct(u32, Vec<Type>),
+    /// Enum definition id plus type arguments.
+    Enum(u32, Vec<Type>),
     Array(Box<Type>),
     Fn(Vec<Type>, Box<Type>),
     /// A type parameter of the enclosing generic function or struct, by
@@ -109,17 +109,13 @@ pub const INT: Type = Type::Int(IntKind::I64);
 
 impl Type {
     /// Reference types are heap pointers the GC must track. A bare type
-    /// parameter is *not* a reference: it is opaque during checking (so
-    /// `nil` is not assignable to it) and never survives to codegen.
+    /// parameter is *not* a reference: it is opaque during checking and
+    /// never survives to codegen.
     pub fn is_ref(&self) -> bool {
         matches!(
             self,
-            Type::Str | Type::Struct(..) | Type::Array(_) | Type::Fn(..) | Type::Nil
+            Type::Str | Type::Struct(..) | Type::Enum(..) | Type::Array(_) | Type::Fn(..)
         )
-    }
-
-    pub fn accepts_nil(&self) -> bool {
-        self.is_ref()
     }
 
     pub fn int_kind(&self) -> Option<IntKind> {
@@ -154,6 +150,9 @@ impl Type {
             Type::Struct(id, targs) => {
                 Type::Struct(*id, targs.iter().map(|t| t.subst(args)).collect())
             }
+            Type::Enum(id, targs) => {
+                Type::Enum(*id, targs.iter().map(|t| t.subst(args)).collect())
+            }
             t => t.clone(),
         }
     }
@@ -164,7 +163,7 @@ impl Type {
             Type::Param(_) => true,
             Type::Array(elem) => elem.has_param(),
             Type::Fn(params, ret) => params.iter().any(Type::has_param) || ret.has_param(),
-            Type::Struct(_, targs) => targs.iter().any(Type::has_param),
+            Type::Struct(_, targs) | Type::Enum(_, targs) => targs.iter().any(Type::has_param),
             _ => false,
         }
     }
@@ -172,9 +171,10 @@ impl Type {
     pub fn display<'a>(
         &'a self,
         structs: &'a [StructInfo],
+        enums: &'a [EnumInfo],
         params: &'a [String],
     ) -> TypeDisplay<'a> {
-        TypeDisplay { ty: self, structs, params }
+        TypeDisplay { ty: self, structs, enums, params }
     }
 }
 
@@ -207,9 +207,43 @@ pub struct StructInfo {
     pub line: u32,
 }
 
+/// An enum *definition*. Variant payload types may contain `Type::Param`
+/// indices into `type_params`. Variant order fixes the runtime tag: variant
+/// `i` is tag `i`, stored in the object header's aux word.
+#[derive(Debug)]
+pub struct EnumInfo {
+    pub name: String,
+    pub type_params: Vec<String>,
+    pub variants: Vec<(String, VariantPayload)>,
+    #[allow(dead_code)]
+    pub line: u32,
+}
+
+/// What a variant carries.
+#[derive(Debug, Clone)]
+pub enum VariantPayload {
+    /// Nothing: compiled to a static singleton object.
+    Bare,
+    /// A single value in one payload slot.
+    Single(Type),
+    /// Named fields laid out inline in the enum object's payload (packed
+    /// like struct fields). There is no separate payload object, so a node
+    /// with inline fields costs one allocation.
+    Fields(Vec<(String, Type)>),
+}
+
+impl EnumInfo {
+    /// A bare-only (C-like) enum: every value is a shared static singleton,
+    /// so reference identity is structural equality and `==` is allowed.
+    pub fn is_bare(&self) -> bool {
+        self.variants.iter().all(|(_, p)| matches!(p, VariantPayload::Bare))
+    }
+}
+
 pub struct TypeDisplay<'a> {
     ty: &'a Type,
     structs: &'a [StructInfo],
+    enums: &'a [EnumInfo],
     params: &'a [String],
 }
 
@@ -222,37 +256,43 @@ impl fmt::Display for TypeDisplay<'_> {
             Type::Float => write!(f, "float"),
             Type::Bool => write!(f, "bool"),
             Type::Str => write!(f, "string"),
-            Type::Nil => write!(f, "nil"),
             Type::Param(i) => match self.params.get(*i as usize) {
                 Some(name) => write!(f, "{name}"),
                 None => write!(f, "<param {i}>"),
             },
-            Type::Struct(id, targs) => {
-                write!(f, "{}", self.structs[*id as usize].name)?;
+            Type::Struct(..) | Type::Enum(..) => {
+                let (name, targs) = match self.ty {
+                    Type::Struct(id, targs) => (&self.structs[*id as usize].name, targs),
+                    Type::Enum(id, targs) => (&self.enums[*id as usize].name, targs),
+                    _ => unreachable!(),
+                };
+                write!(f, "{name}")?;
                 if !targs.is_empty() {
                     write!(f, "<")?;
                     for (i, t) in targs.iter().enumerate() {
                         if i > 0 {
                             write!(f, ", ")?;
                         }
-                        write!(f, "{}", t.display(self.structs, self.params))?;
+                        write!(f, "{}", t.display(self.structs, self.enums, self.params))?;
                     }
                     write!(f, ">")?;
                 }
                 Ok(())
             }
-            Type::Array(elem) => write!(f, "[{}]", elem.display(self.structs, self.params)),
+            Type::Array(elem) => {
+                write!(f, "[{}]", elem.display(self.structs, self.enums, self.params))
+            }
             Type::Fn(params, ret) => {
                 write!(f, "fn(")?;
                 for (i, p) in params.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{}", p.display(self.structs, self.params))?;
+                    write!(f, "{}", p.display(self.structs, self.enums, self.params))?;
                 }
                 write!(f, ")")?;
                 if **ret != Type::Unit {
-                    write!(f, ": {}", ret.display(self.structs, self.params))?;
+                    write!(f, ": {}", ret.display(self.structs, self.enums, self.params))?;
                 }
                 Ok(())
             }

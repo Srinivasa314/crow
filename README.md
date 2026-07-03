@@ -7,27 +7,35 @@ native code with [Cranelift](https://cranelift.dev/) and running on a **precise 
 
 
 ```
-struct Star { name: string, mag: float }
-
-fn brightest(stars: [Star]): Star {
-    let best = stars[0];
-    for (let i = 1; i < len(stars); i += 1) {
-        best = if stars[i].mag < best.mag { stars[i] } else { best };
-    }
-    best
+enum Shape {
+    Circle(float),
+    Rect { w: float, h: float },    
 }
 
-fn last<T>(xs: [T]): T { xs[len(xs) - 1] }
+fn area(s: Shape): float {
+    (match s {
+        Shape.Circle(r) => 3.14159 * r * r,
+        Shape.Rect { w, h } => w * h,
+    })
+}
+
+fn find<T>(xs: [T], want: fn(T): bool): Option<T> {
+    for (let i = 0; i < len(xs); i += 1) {
+        if want(xs[i]) { return Option.Some(xs[i]); }
+    }
+    Option.None
+}
 
 fn main() {
-    let sky = [
-        Star { name: "Vega",   mag: 0.03 },
-        Star { name: "Sirius", mag: -1.46 },
-        Star { name: "Deneb",  mag: 1.25 },
-    ];
-    println("brightest: " + brightest(sky).name);   // brightest: Sirius
-    println("last entry: " + last(sky).name);       // last entry: Deneb
-    println(itos(len(sky)) + " stars, from magnitude " + ftos(brightest(sky).mag));
+    let shapes = [Shape.Circle(1.5), Shape.Rect { w: 4.0, h: 5.0 }];
+    let min = 10.0;                                  
+    match find(shapes, fn(s: Shape): bool { area(s) > min }) {
+        Option.Some(s) => { println("found: " + ftos(area(s))); }    // found: 20.0
+        Option.None => { println("all smaller than " + ftos(min)); }
+    }
+
+    let name = find(["crow", "raven", "rook"], fn(n: string): bool { len(n) == 4 });
+    println(unwrap(name));                           // crow
 }
 ```
 
@@ -51,14 +59,16 @@ and no undefined behavior. The short version:
 - Sized integers with **no implicit conversions**, checked
   `as` casts, and literals that adopt the type context expects; bitwise
   operators and compound assignment included.
-- Structs, growable arrays `[T]`, immutable UTF-8 strings (byte-indexable,
+- Structs, enums (bare, single-value, or inline-field variants) with
+  exhaustive `match`, growable arrays `[T]`, immutable UTF-8 strings
+  (byte-indexable,
   `stob`/`btos` to and from `[u8]`), first-class functions and lambdas with
   by-value capture, and inference-only generics.
-- `if` is an expression, and a function body's final bare expression is
-  returned: `fn double(x: int): int { x * 2 }`.
-- `nil` is the checked null reference, and every error path — bounds,
-  integer overflow, division, casts, shifts, even runaway recursion — panics
-  with a source line number.
+- `if` and `match` are expressions, and a function body's final bare
+  expression is returned: `fn double(x: int): int { x * 2 }`.
+- **No null**: absence is the predeclared `Option<T>` enum, and every error
+  path — bounds, `unwrap` of `None`, integer overflow, division, casts,
+  shifts, even runaway recursion — panics with a source line number.
 
 **[Read the book](BOOK.md)** for the full guide. `examples/` has runnable
 programs — `features.crow` is a tour of the whole language.
@@ -79,12 +89,15 @@ into every executable). Key points, expanded in
   every semantic test with a 64 KiB nursery to prove it.
 - **Monomorphization by shape**: all reference instantiations of a generic
   function share one compiled body; scalar ones specialize by width and
-  register class. GC descriptors deduplicate by object shape.
+  register class. GC descriptors deduplicate by object shape — enums keep
+  their variant tag in a spare header word, so the GC never knows they
+  exist, and bare variants are allocation-free static singletons.
 - **Everything panics with a line number**, including stack overflow — a
   prologue guard in non-leaf functions that costs nothing measurable.
-- **Performance** is within 1.2–1.4× of Go on small benchmarks (the upper
-  end is fib paying for checked integer arithmetic); see
-  [bench/](bench/README.md) for numbers and analysis.
+- **Performance** is within 1.2–1.4× of Go on small benchmarks, including
+  an allocation-bound tree benchmark (the upper end is fib paying for
+  checked integer arithmetic); see [bench/](bench/README.md) for numbers
+  and analysis.
 
 ## Testing
 
@@ -97,7 +110,8 @@ into every executable). Key points, expanded in
   size accounting); the GC itself is exercised end-to-end.
 - **`tests/lang.rs`** — language semantics end-to-end: every operator and
   type, division/overflow edge cases, short-circuit evaluation, closures and
-  capture rules, nil, reference semantics, runtime panics with line numbers.
+  capture rules, enums and match, `Option`, reference semantics, runtime
+  panics with line numbers.
   Every semantic program — including the panic tests — runs **twice**: once
   normally and once with a 64 KiB nursery (`CROW_NURSERY_KB=64`), so the
   whole suite doubles as a GC relocation stress test. GC-specific tests cover

@@ -84,31 +84,37 @@ fn main() {
 fn bool_storage_is_byte_sized() {
     check_ok(
         r#"
-struct Flags { a: bool, b: bool, tag: u8, c: bool, name: string, d: bool, next: Flags }
+struct Flags { a: bool, b: bool, tag: u8, c: bool, name: string, d: bool, next: Option<Flags> }
 fn flip(f: Flags) { f.a = !f.a; f.b = !f.b; f.c = !f.c; f.d = !f.d; }
 fn main() {
-    let f = Flags { a: true, b: false, tag: 7, c: true, name: "x", d: false, next: nil };
+    let f = Flags { a: true, b: false, tag: 7, c: true, name: "x", d: false, next: Option.None };
     assert(f.a && !f.b && f.c && !f.d && f.name == "x");
     flip(f);
     assert(!f.a && f.b && !f.c && f.d);
     assert(f.tag == 7);                    // neighbors in the same word untouched
 
     // A linked chain with byte-packed flags survives collection intact.
-    let head: Flags = nil;
+    let head: Option<Flags> = Option.None;
     for (let i = 0; i < 100; i = i + 1) {
-        head = Flags {
+        head = Option.Some(Flags {
             a: i % 2 == 0, b: i % 3 == 0, tag: 1, c: true,
             name: itos(i), d: false, next: head,
-        };
+        });
     }
     gc_collect();
     let cur = head;
     let k = 99;
-    while (cur != nil) {
-        assert(cur.a == (k % 2 == 0) && cur.b == (k % 3 == 0) && cur.c && !cur.d);
-        assert(cur.name == itos(k));
-        cur = cur.next;
-        k = k - 1;
+    let go = true;
+    while go {
+        match cur {
+            Option.Some(n) => {
+                assert(n.a == (k % 2 == 0) && n.b == (k % 3 == 0) && n.c && !n.d);
+                assert(n.name == itos(k));
+                cur = n.next;
+                k = k - 1;
+            }
+            Option.None => { go = false; }
+        }
     }
     assert(k == -1);
 
@@ -257,7 +263,7 @@ fn structs() {
         r#"
 struct Point { x: int, y: int }
 struct Seg { a: Point, b: Point, name: string }
-struct Node { value: int, next: Node }
+struct Node { value: int, next: Option<Node> }
 fn main() {
     let p = Point { x: 1, y: 2 };
     p.x = 10;
@@ -270,40 +276,11 @@ fn main() {
     assert(p == q);                // identity...
     let r = Point { x: 10, y: 99 };
     assert(p != r);                // ...not structural equality
-    let head = Node { value: 1, next: Node { value: 2, next: nil } };
-    assert(head.next.value == 2);
-    assert(head.next.next == nil);
-    head.next.next = Node { value: 3, next: nil };
-    assert(head.next.next.value == 3);
-    println("ok");
-}
-"#,
-    );
-}
-
-#[test]
-fn nil_semantics() {
-    check_ok(
-        r#"
-struct P { v: int }
-fn take(p: P): bool { return p == nil; }
-fn give(yes: bool): P { if (yes) { return nil; } return P { v: 1 }; }
-fn main() {
-    let p: P = nil;
-    assert(p == nil && nil == p);
-    p = P { v: 5 };
-    assert(p != nil && nil != p);
-    assert(take(nil));
-    assert(!take(p));
-    assert(give(true) == nil);
-    assert(give(false).v == 1);
-    let s: string = nil;
-    assert(s == nil);
-    let xs: [int] = nil;
-    assert(xs == nil);
-    let f: fn(): int = nil;
-    assert(f == nil);
-    assert(nil == nil);
+    let head = Node { value: 1, next: Option.Some(Node { value: 2, next: Option.None }) };
+    let second = unwrap(head.next);
+    assert(second.value == 2);
+    second.next = Option.Some(Node { value: 3, next: Option.None });
+    assert(unwrap(unwrap(head.next).next).value == 3);
     println("ok");
 }
 "#,
@@ -569,28 +546,35 @@ fn gc_object_graphs() {
         r#"
 // A struct with interleaved scalar and reference fields: its descriptor
 // bitmap must be exactly right or the GC corrupts it.
-struct Mix { a: int, s: string, f: float, next: Mix, ok: bool, xs: [int] }
+struct Mix { a: int, s: string, f: float, next: Option<Mix>, ok: bool, xs: [int] }
 fn build(n: int): Mix {
-    let head: Mix = nil;
-    for (let i = 0; i < n; i = i + 1) {
-        head = Mix {
+    let head: Option<Mix> = Option.None;
+    for (let i = 0; i < n - 1; i = i + 1) {
+        head = Option.Some(Mix {
             a: i, s: itos(i), f: itof(i) + 0.5,
             next: head, ok: i % 2 == 0, xs: [i, i + 1],
-        };
+        });
     }
-    return head;
+    let n1 = n - 1;
+    Mix { a: n1, s: itos(n1), f: itof(n1) + 0.5, next: head, ok: n1 % 2 == 0, xs: [n1, n1 + 1] }
 }
 fn verify(m: Mix, n: int) {
     let i = n - 1;
-    let cur = m;
-    while (cur != nil) {
-        assert(cur.a == i);
-        assert(cur.s == itos(i));
-        assert(cur.f == itof(i) + 0.5);
-        assert(cur.ok == (i % 2 == 0));
-        assert(cur.xs[0] == i && cur.xs[1] == i + 1);
-        cur = cur.next;
-        i = i - 1;
+    let cur = Option.Some(m);
+    let go = true;
+    while go {
+        match cur {
+            Option.Some(x) => {
+                assert(x.a == i);
+                assert(x.s == itos(i));
+                assert(x.f == itof(i) + 0.5);
+                assert(x.ok == (i % 2 == 0));
+                assert(x.xs[0] == i && x.xs[1] == i + 1);
+                cur = x.next;
+                i = i - 1;
+            }
+            Option.None => { go = false; }
+        }
     }
     assert(i == -1);
 }
@@ -604,8 +588,10 @@ fn main() {
     }
     // Old-to-young pointer stores exercise the write barrier.
     for (let i = 0; i < 200; i = i + 1) {
-        let old = keep.next;
-        keep.next = Mix { a: old.a, s: old.s, f: old.f, next: old.next, ok: old.ok, xs: old.xs };
+        let old = unwrap(keep.next);
+        keep.next = Option.Some(Mix {
+            a: old.a, s: old.s, f: old.f, next: old.next, ok: old.ok, xs: old.xs,
+        });
     }
     verify(keep, 300);
     // A buffer far larger than the nursery takes the pretenuring path.
@@ -626,16 +612,20 @@ fn gc_during_deep_recursion() {
     // of compiled frames on the stack — a stress test for the stack walker.
     check_ok(
         r#"
-struct Node { value: int, next: Node }
-fn build(n: int): Node {
-    let head: Node = nil;
-    for (let i = 1; i <= n; i = i + 1) { head = Node { value: i, next: head }; }
+struct Node { value: int, next: Option<Node> }
+fn build(n: int): Option<Node> {
+    let head: Option<Node> = Option.None;
+    for (let i = 1; i <= n; i = i + 1) { head = Option.Some(Node { value: i, next: head }); }
     return head;
 }
-fn sum_alloc(n: Node): int {
-    if (n == nil) { return 0; }
-    assert(len(itos(n.value)) > 0);   // allocate at every depth
-    return n.value + sum_alloc(n.next);
+fn sum_alloc(n: Option<Node>): int {
+    match n {
+        Option.Some(node) => {
+            assert(len(itos(node.value)) > 0);   // allocate at every depth
+            return node.value + sum_alloc(node.next);
+        }
+        Option.None => { return 0; }
+    }
 }
 fn main() {
     let list = build(8000);
@@ -671,15 +661,21 @@ fn nursery_env_var_edge_values() {
     // back to the default. Either way programs must run correctly, including
     // under the tiniest allowed nursery.
     let src = r#"
-struct Node { value: int, next: Node }
+struct Node { value: int, next: Option<Node> }
 fn main() {
-    let head: Node = nil;
+    let head: Option<Node> = Option.None;
     for (let i = 0; i < 500; i = i + 1) {
-        head = Node { value: i, next: head };
+        head = Option.Some(Node { value: i, next: head });
         assert(len(itos(i)) > 0);          // extra churn
     }
     let sum = 0;
-    for (let cur = head; cur != nil; cur = cur.next) { sum = sum + cur.value; }
+    let go = true;
+    while go {
+        match head {
+            Option.Some(n) => { sum = sum + n.value; head = n.next; }
+            Option.None => { go = false; }
+        }
+    }
     assert(sum == 500 * 499 / 2);
     println("ok");
 }
@@ -709,57 +705,6 @@ fn panic_bounds_at_len() {
 #[test]
 fn panic_rem_by_zero() {
     expect_panic("fn main() { let z = 0; println(1 % z); }", "division by zero");
-}
-
-#[test]
-fn panic_nil_field_write() {
-    expect_panic(
-        "struct P { x: int } fn main() { let p: P = nil; p.x = 1; }",
-        "nil dereference",
-    );
-}
-
-#[test]
-fn panic_nil_index() {
-    expect_panic("fn main() { let xs: [int] = nil; println(xs[0]); }", "nil dereference");
-}
-
-#[test]
-fn panic_nil_index_write() {
-    expect_panic("fn main() { let xs: [int] = nil; xs[0] = 1; }", "nil dereference");
-}
-
-#[test]
-fn panic_nil_len() {
-    expect_panic("fn main() { let xs: [int] = nil; println(len(xs)); }", "nil dereference");
-}
-
-#[test]
-fn panic_nil_push() {
-    expect_panic("fn main() { let xs: [int] = nil; push(xs, 1); }", "nil dereference at line 1");
-}
-
-#[test]
-fn panic_nil_pop() {
-    expect_panic("fn main() { let xs: [int] = nil; println(pop(xs)); }", "nil dereference at line 1");
-}
-
-#[test]
-fn panic_nil_concat() {
-    expect_panic(
-        "fn main() { let s: string = nil; println(s + \"x\"); }",
-        "nil dereference at line 1",
-    );
-}
-
-#[test]
-fn panic_print_nil_string() {
-    expect_panic("fn main() { let s: string = nil; println(s); }", "nil dereference at line 1");
-}
-
-#[test]
-fn panic_call_nil_function() {
-    expect_panic("fn main() { let f: fn(): int = nil; println(f()); }", "nil dereference");
 }
 
 #[test]
@@ -984,14 +929,14 @@ fn packed_structs_and_gc() {
         r#"
 // Mixed sized fields around references: field offsets and the descriptor
 // refmap must agree exactly or the GC corrupts the object.
-struct Mix { a: u8, s: string, b: i16, f: float, c: u32, next: Mix, d: i8, e: u64 }
-fn build(n: int): Mix {
-    let head: Mix = nil;
+struct Mix { a: u8, s: string, b: i16, f: float, c: u32, next: Option<Mix>, d: i8, e: u64 }
+fn build(n: int): Option<Mix> {
+    let head: Option<Mix> = Option.None;
     for (let i = 0; i < n; i = i + 1) {
-        head = Mix {
+        head = Option.Some(Mix {
             a: (i % 256) as u8, s: itos(i), b: (0 - i) as i16, f: itof(i) + 0.5,
             c: i as u32, next: head, d: (i % 100) as i8, e: 18446744073709551615,
-        };
+        });
     }
     return head;
 }
@@ -999,21 +944,27 @@ fn main() {
     let keep = build(300);
     for (let round = 0; round < 5; round = round + 1) {
         let junk = build(50);
-        assert(junk.a == 49 as u8);
+        assert(unwrap(junk).a == 49 as u8);
         gc_collect();
     }
     let i = 299;
     let cur = keep;
-    while (cur != nil) {
-        assert(cur.a as int == i % 256);
-        assert(cur.s == itos(i));
-        assert(cur.b as int == 0 - i);
-        assert(cur.f == itof(i) + 0.5);
-        assert(cur.c as int == i);
-        assert(cur.d as int == i % 100);
-        assert(cur.e == 18446744073709551615);
-        cur = cur.next;
-        i = i - 1;
+    let go = true;
+    while go {
+        match cur {
+            Option.Some(x) => {
+                assert(x.a as int == i % 256);
+                assert(x.s == itos(i));
+                assert(x.b as int == 0 - i);
+                assert(x.f == itof(i) + 0.5);
+                assert(x.c as int == i);
+                assert(x.d as int == i % 100);
+                assert(x.e == 18446744073709551615);
+                cur = x.next;
+                i = i - 1;
+            }
+            Option.None => { go = false; }
+        }
     }
     assert(i == -1);
     println("ok");
@@ -1065,23 +1016,24 @@ fn gc_old_to_young_packed_struct_writes() {
 // An old-generation packed struct receiving young references: the write
 // barrier must record edges through packed field offsets, and each minor
 // collection must rewrite exactly those slots (and nothing around them).
-struct Packed { tag: u8, s: string, n: i16, next: Packed, id: u32 }
+struct Packed { tag: u8, s: string, n: i16, next: Option<Packed>, id: u32 }
 fn main() {
-    let old = Packed { tag: 7, s: "anchor", n: -300, next: nil, id: 123456789 };
+    let old = Packed { tag: 7, s: "anchor", n: -300, next: Option.None, id: 123456789 };
     gc_collect();                        // promotes `old` out of the nursery
     for (let i = 0; i < 100; i = i + 1) {
         old.s = itos(i) + "-young";      // old -> young edges via packed offsets
-        old.next = Packed {
+        old.next = Option.Some(Packed {
             tag: (i % 256) as u8, s: itos(i), n: (0 - i) as i16,
-            next: nil, id: i as u32,
-        };
+            next: Option.None, id: i as u32,
+        });
         gc_collect();                    // forwards the remembered slots
         assert(old.tag == 7 && old.n == -300 && old.id == 123456789);
         assert(old.s == itos(i) + "-young");
-        assert(old.next.tag as int == i % 256);
-        assert(old.next.s == itos(i));
-        assert(old.next.n as int == 0 - i);
-        assert(old.next.id as int == i);
+        let young = unwrap(old.next);
+        assert(young.tag as int == i % 256);
+        assert(young.s == itos(i));
+        assert(young.n as int == 0 - i);
+        assert(young.id as int == i);
     }
     println("ok");
 }
@@ -1309,10 +1261,7 @@ fn main() {
     let s: Pair<[string]> = Pair { a: ["u"], b: [] };
     push(s.b, "v");
     assert(s.a[0] == "u" && s.b[0] == "v");
-    // nil is assignable to generic struct types.
-    let z: Pair<int> = nil;
-    assert(z == nil);
-    z = pair_of(9);
+    let z = pair_of(9);
     assert(z.a == 9);
     // Annotation seeds inference of the literal's arguments.
     let lit: Pair<u8> = Pair { a: 1, b: 255 };
@@ -1332,18 +1281,24 @@ fn generic_struct_layouts_and_gc() {
     check_ok(
         r#"
 struct Mix<T> { t: T, s: string, u: T, n: int }
-struct Node<T> { v: T, next: Node<T> }
-fn build<T>(v: T, n: int): Node<T> {
-    let head: Node<T> = nil;
+struct Node<T> { v: T, next: Option<Node<T>> }
+fn build<T>(v: T, n: int): Option<Node<T>> {
+    let head: Option<Node<T>> = Option.None;
     for (let i = 0; i < n; i = i + 1) {
-        head = Node { v: v, next: head };
+        head = Option.Some(Node { v: v, next: head });
     }
     return head;
 }
-fn count<T>(head: Node<T>): int {
+fn count<T>(head: Option<Node<T>>): int {
     let n = 0;
     let cur = head;
-    while (cur != nil) { n = n + 1; cur = cur.next; }
+    let go = true;
+    while go {
+        match cur {
+            Option.Some(node) => { n = n + 1; cur = node.next; }
+            Option.None => { go = false; }
+        }
+    }
     return n;
 }
 fn main() {
@@ -1361,7 +1316,13 @@ fn main() {
     assert(c.t == 0.5 && c.s == "floats" && c.u == 2.5 && c.n == 7);
     assert(count(keep) == 200 && count(nums) == 200);
     let cur = keep;
-    while (cur != nil) { assert(cur.v == "s"); cur = cur.next; }
+    let go = true;
+    while go {
+        match cur {
+            Option.Some(node) => { assert(node.v == "s"); cur = node.next; }
+            Option.None => { go = false; }
+        }
+    }
     println("ok");
 }
 "#,
@@ -1497,7 +1458,7 @@ fn generic_inference_from_context() {
         r#"
 struct Pair<T> { a: T, b: T }
 fn empty<T>(): [T] { return []; }
-fn none<T>(): Pair<T> { return nil; }
+fn none<T>(): Option<T> { return Option.None; }
 fn main() {
     let xs: [string] = empty();       // solved from the annotation
     push(xs, "a");
@@ -1505,8 +1466,8 @@ fn main() {
     let ys: [int] = empty();
     push(ys, 5);
     assert(ys[0] == 5);
-    let p: Pair<int> = none();
-    assert(p == nil);
+    let p: Option<int> = none();        // T solved from the annotation
+    match p { Option.Some(v) => { assert(v != v); } Option.None => { } }
     // The expected type also flows through assignment targets.
     let zs: [[int]] = [];
     push(zs, empty());
@@ -1525,13 +1486,6 @@ fn f<T>(x: T): bool { return x == x; }
 fn main() { assert(f(1)); }
 "#,
         "cannot compare values of generic type T",
-    );
-    expect_compile_error(
-        r#"
-fn f<T>(x: T) { let y = x; }
-fn main() { f(nil); }
-"#,
-        "cannot infer a type parameter from 'nil'",
     );
     expect_compile_error(
         r#"
@@ -1571,7 +1525,7 @@ fn main() { let p = Pair { a: 1, b: "s" }; }
     expect_compile_error(
         r#"
 struct Pair<T> { a: T, b: T }
-fn main() { let p: Pair<int, int> = nil; }
+fn main() { let p: Pair<int, int> = Pair { a: 1, b: 2 }; }
 "#,
         "expects 1 type argument(s), got 2",
     );
@@ -1727,19 +1681,6 @@ fn main() {
 }
 
 #[test]
-fn panic_string_index_nil() {
-    expect_panic(
-        r#"
-fn main() {
-    let s: string = nil;
-    println(s[0]);
-}
-"#,
-        "nil dereference at line 4",
-    );
-}
-
-#[test]
 fn compound_assignment() {
     check_ok(
         r#"
@@ -1874,12 +1815,12 @@ fn main() {
     let x = if true { note(log, 1) } else { note(log, 2) };
     assert(x == 1 && len(log) == 1 && log[0] == 1);
 
-    // References and nil branches.
-    let p: P = nil;
-    let q = if p == nil { P { v: 7 } } else { p };
-    assert(q.v == 7);
-    let r = if false { P { v: 1 } } else { nil };
-    assert(r == nil);
+    // Reference-typed branches.
+    let p = P { v: 7 };
+    let q = if p.v == 7 { p } else { P { v: 0 } };
+    assert(q == p && q.v == 7);
+    let r = if false { Option.Some(P { v: 1 }) } else { Option.None };
+    match r { Option.Some(w) => { assert(w != w); } Option.None => { } }
 
     // Floats and nesting.
     let f = if true { if false { 1.5 } else { 2.5 } } else { 0.0 };
@@ -1954,19 +1895,6 @@ fn panic_stof_invalid() {
 }
 
 #[test]
-fn panic_stoi_nil() {
-    expect_panic(
-        r#"
-fn main() {
-    let s: string = nil;
-    println(stoi(s));
-}
-"#,
-        "nil dereference at line 4",
-    );
-}
-
-#[test]
 fn stob_btos() {
     check_ok(
         r#"
@@ -2024,28 +1952,6 @@ fn main() {
 }
 
 #[test]
-fn panic_stob_btos_nil() {
-    expect_panic(
-        r#"
-fn main() {
-    let s: string = nil;
-    let x = stob(s);
-}
-"#,
-        "nil dereference at line 4",
-    );
-    expect_panic(
-        r#"
-fn main() {
-    let bs: [u8] = nil;
-    let x = btos(bs);
-}
-"#,
-        "nil dereference at line 4",
-    );
-}
-
-#[test]
 fn tail_expressions() {
     check_ok(
         r#"
@@ -2088,14 +1994,22 @@ fn main() {
 #[test]
 fn nursery_adapts_to_working_set() {
     let src = r#"
-struct Tree { left: Tree, right: Tree, value: int }
+enum Tree { Branch { left: Tree, right: Tree, value: int }, Leaf }
 fn build(depth: int, value: int): Tree {
-    if depth == 0 { return Tree { left: nil, right: nil, value: value }; }
-    Tree { left: build(depth - 1, value * 2), right: build(depth - 1, value * 2 + 1), value: value }
+    if depth == 0 {
+        return Tree.Branch { left: Tree.Leaf, right: Tree.Leaf, value: value };
+    }
+    Tree.Branch {
+        left: build(depth - 1, value * 2),
+        right: build(depth - 1, value * 2 + 1),
+        value: value,
+    }
 }
 fn sum(t: Tree): int {
-    if t == nil { return 0; }
-    t.value + sum(t.left) + sum(t.right)
+    match t {
+        Tree.Branch { left, right, value } => { return value + sum(left) + sum(right); }
+        Tree.Leaf => { return 0; }
+    }
 }
 fn main() {
     let total = 0;
@@ -2125,14 +2039,22 @@ fn main() {
 #[test]
 fn nursery_shrinks_after_allocation_phase() {
     let src = r#"
-struct Tree { left: Tree, right: Tree, value: int }
+enum Tree { Branch { left: Tree, right: Tree, value: int }, Leaf }
 fn build(depth: int, value: int): Tree {
-    if depth == 0 { return Tree { left: nil, right: nil, value: value }; }
-    Tree { left: build(depth - 1, value * 2), right: build(depth - 1, value * 2 + 1), value: value }
+    if depth == 0 {
+        return Tree.Branch { left: Tree.Leaf, right: Tree.Leaf, value: value };
+    }
+    Tree.Branch {
+        left: build(depth - 1, value * 2),
+        right: build(depth - 1, value * 2 + 1),
+        value: value,
+    }
 }
 fn sum(t: Tree): int {
-    if t == nil { return 0; }
-    t.value + sum(t.left) + sum(t.right)
+    match t {
+        Tree.Branch { left, right, value } => { return value + sum(left) + sum(right); }
+        Tree.Leaf => { return 0; }
+    }
 }
 fn main() {
     let total = 0;
@@ -2155,5 +2077,625 @@ fn main() {
     assert!(
         *sizes.last().unwrap() < peak,
         "expected a shrink after the garbage phase: {sizes:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Enums and match
+// ---------------------------------------------------------------------------
+
+#[test]
+fn enum_basics() {
+    check_ok(
+        r#"
+struct Rect { w: float, h: float }
+enum Shape { Circle(float), Box(Rect), Empty }
+fn area(s: Shape): float {
+    // A statement starting with `match` is the match statement, so a tail
+    // match-expression is parenthesized (same rule as `if`).
+    (match s {
+        Shape.Circle(r) => 3.0 * r * r,
+        Shape.Box(b) => b.w * b.h,
+        Shape.Empty => 0.0,
+    })
+}
+fn describe(s: Shape): string {
+    return match s {
+        Shape.Circle(r) => "circle " + ftos(r),
+        _ => "other",
+    };
+}
+fn main() {
+    assert(area(Shape.Circle(2.0)) == 12.0);
+    assert(area(Shape.Box(Rect { w: 2.0, h: 3.0 })) == 6.0);
+    assert(area(Shape.Empty) == 0.0);
+    assert(describe(Shape.Circle(1.5)) == "circle 1.5");
+    assert(describe(Shape.Empty) == "other");
+
+    // Match statement: arms are blocks, comma after a block is optional.
+    let hits = 0;
+    match Shape.Box(Rect { w: 1.0, h: 1.0 }) {
+        Shape.Circle(r) => { assert(false); assert(r == r); }
+        Shape.Box(b) => { hits += 1; assert(b.w == 1.0); },
+        Shape.Empty => { assert(false); }
+    }
+    assert(hits == 1);
+
+    // The payload is copied out by value at the binder...
+    let s = Shape.Circle(5.0);
+    match s {
+        Shape.Circle(r) => {
+            let r2 = r + 1.0;
+            assert(r2 == 6.0);
+        }
+        _ => { assert(false); }
+    }
+    // ...and a struct payload still aliases the shared object.
+    let rect = Rect { w: 1.0, h: 1.0 };
+    match Shape.Box(rect) {
+        Shape.Box(b) => { b.w = 9.0; }
+        _ => { assert(false); }
+    }
+    assert(rect.w == 9.0);
+    println("ok");
+}
+"#,
+    );
+}
+
+#[test]
+fn enum_bare_singletons_and_equality() {
+    check_ok(
+        r#"
+enum Color { Red, Green, Blue }
+fn pick(n: int): Color {
+    return match n { 0 => Color.Red, 1 => Color.Green, _ => Color.Blue };
+}
+fn main() {
+    // Bare variants are shared static singletons, so identity == is
+    // structural equality — including across separate constructions.
+    assert(Color.Red == Color.Red);
+    assert(Color.Red != Color.Green);
+    assert(pick(1) == Color.Green);
+    let c = pick(2);
+    assert(c == Color.Blue && c != Color.Red);
+
+    // They survive being stored, collected, and reloaded.
+    let all = [Color.Red, Color.Green, Color.Blue];
+    gc_collect();
+    assert(all[0] == Color.Red && all[1] == pick(1) && all[2] == c);
+    println("ok");
+}
+"#,
+    );
+}
+
+#[test]
+fn enum_generic_option() {
+    check_ok(
+        r#"
+fn find(xs: [int], want: int): Option<int> {
+    for (let i = 0; i < len(xs); i += 1) {
+        if xs[i] == want { return Option.Some(i); }
+    }
+    Option.None
+}
+fn wrap<T>(x: T): Option<T> { Option.Some(x) }
+fn or_else<T>(o: Option<T>, d: T): T {
+    return match o { Option.Some(v) => v, Option.None => d };
+}
+fn main() {
+    // Inference: from the payload, from the expected type, from returns.
+    let a = Option.Some(42);
+    let b: Option<string> = Option.None;
+    assert(unwrap(a) == 42);
+    assert(or_else(b, "d") == "d");
+    assert(unwrap(find([5, 6, 7], 6)) == 1);
+    match find([5], 9) {
+        Option.Some(i) => { assert(i != i); }
+        Option.None => { }
+    }
+
+    // Payload shapes: float, narrow ints, strings, structs — and the
+    // generic body is shared per shape.
+    assert(unwrap(wrap(2.5)) == 2.5);
+    let u: u8 = 200;
+    assert(unwrap(wrap(u)) == 200);
+    assert(unwrap(wrap("hi")) == "hi");
+
+    // Nesting: Some(None) and Some(Some(v)) stay distinct.
+    let inner: Option<int> = Option.None;
+    let nested = Option.Some(inner);
+    match nested {
+        Option.Some(o) => {
+            match o {
+                Option.Some(v) => { assert(v != v); }
+                Option.None => { }
+            }
+        }
+        Option.None => { assert(false); }
+    }
+    assert(unwrap(unwrap(Option.Some(Option.Some(7)))) == 7);
+    println("ok");
+}
+"#,
+    );
+}
+
+#[test]
+fn enum_recursive_and_gc_relocation() {
+    check_ok(
+        r#"
+enum List { Cons(Node), End }
+struct Node { head: int, tail: List }
+fn range_list(n: int): List {
+    let l = List.End;
+    for (let i = n; i > 0; i -= 1) {
+        l = List.Cons(Node { head: i, tail: l });
+    }
+    l
+}
+fn sum(l: List): int {
+    let total = 0;
+    let cur = l;
+    let go = true;
+    while go {
+        match cur {
+            List.Cons(n) => { total += n.head; cur = n.tail; }
+            List.End => { go = false; }
+        }
+    }
+    total
+}
+fn main() {
+    // Long chains of enum objects survive evacuation, and matching keeps
+    // working on relocated objects.
+    let l = range_list(2000);
+    gc_collect();
+    assert(sum(l) == 2001000);
+
+    // Options holding fresh strings under allocation pressure.
+    let kept: [Option<string>] = [];
+    for (let i = 0; i < 2000; i += 1) {
+        push(kept, Option.Some("v" + itos(i)));
+        if i % 3 == 0 { push(kept, Option.None); }
+    }
+    gc_collect();
+    assert(unwrap(kept[0]) == "v0");
+    match kept[1] {                        // the None pushed at i == 0
+        Option.Some(v) => { assert(v != v); }
+        Option.None => { }
+    }
+    assert(unwrap(kept[2]) == "v1");
+    println("ok");
+}
+"#,
+    );
+}
+
+#[test]
+fn match_on_ints_bools_and_bytes() {
+    check_ok(
+        r#"
+fn name(n: int): string {
+    return match n { 0 => "zero", 7 => "seven", -1 => "neg", _ => "other" };
+}
+fn main() {
+    assert(name(0) == "zero" && name(7) == "seven" && name(-1) == "neg");
+    assert(name(100) == "other");
+
+    // bool: true/false cover everything; wildcard also allowed.
+    let big = match 5 > 3 { true => 1, false => 0 };
+    assert(big == 1);
+    match false {
+        true => { assert(false); }
+        _ => { }
+    }
+
+    // Byte patterns against string bytes; literals adopt the u8 scrutinee.
+    let s = "c0";
+    assert((match s[0] { b'a' => 1, b'c' => 2, _ => 3 }) == 2);
+    assert((match s[1] { 48 => "digit", _ => "no" }) == "digit");
+
+    // Sized scrutinee: literals range-check at its type.
+    let u: u8 = 255;
+    assert((match u { 255 => true, _ => false }));
+
+    // Statement form on ints, with side effects and control flow.
+    let total = 0;
+    for (let i = 0; i < 5; i += 1) {
+        match i % 3 {
+            0 => { total += 100; }
+            1 => { continue; }
+            _ => { total += 1; }
+        }
+    }
+    assert(total == 201);   // i=0,3 add 100 each; i=2 adds 1; i=1,4 skip
+    println("ok");
+}
+"#,
+    );
+}
+
+#[test]
+fn match_interactions() {
+    check_ok(
+        r#"
+enum Op { Add(int), Mul(int), Reset }
+fn apply(acc: int, op: Op): int {
+    return match op {
+        Op.Add(n) => acc + n,
+        Op.Mul(n) => acc * n,
+        Op.Reset => 0,
+    };
+}
+fn main() {
+    // Enums in arrays, driven through a fold.
+    let ops = [Op.Add(5), Op.Mul(3), Op.Add(1), Op.Reset, Op.Add(2)];
+    let acc = 0;
+    for (let i = 0; i < len(ops); i += 1) { acc = apply(acc, ops[i]); }
+    assert(acc == 2);
+
+    // Match arms returning early from the enclosing function count as
+    // terminated paths; nested matches; match in argument position.
+    assert(apply(apply(0, Op.Add(4)), Op.Mul(10)) == 40);
+    let o = Option.Some(Op.Mul(6));
+    let v = match o {
+        Option.Some(op) => apply(7, op),
+        Option.None => -1,
+    };
+    assert(v == 42);
+
+    // Binders shadow like ordinary locals and scope to their arm.
+    let n = 10;
+    match Op.Add(1) {
+        Op.Add(n) => { assert(n == 1); }
+        _ => { }
+    }
+    assert(n == 10);
+
+    // Closures capture match binders by value.
+    let f = match Op.Mul(3) {
+        Op.Mul(m) => fn(x: int): int { x * m },
+        _ => fn(x: int): int { x },
+    };
+    assert(f(7) == 21);
+    println("ok");
+}
+"#,
+    );
+}
+
+#[test]
+fn match_returns_on_all_paths() {
+    check_ok(
+        r#"
+enum Sign { Neg, Zero, Pos }
+fn classify(n: int): Sign {
+    // A match whose arms all return satisfies the all-paths-return check.
+    match n {
+        0 => { return Sign.Zero; }
+        _ => {
+            if n < 0 { return Sign.Neg; }
+            return Sign.Pos;
+        }
+    }
+}
+fn main() {
+    assert(classify(0) == Sign.Zero);
+    assert(classify(-5) == Sign.Neg);
+    assert(classify(9) == Sign.Pos);
+    println("ok");
+}
+"#,
+    );
+}
+
+#[test]
+fn unwrap_none_panics() {
+    expect_panic(
+        r#"
+fn main() {
+    let o: Option<int> = Option.None;
+    println(unwrap(o));
+}
+"#,
+        "unwrap of None at line 4",
+    );
+}
+
+#[test]
+fn enum_compile_errors() {
+    // Exhaustiveness.
+    expect_compile_error(
+        "enum E { A, B } fn main() { match E.A { E.A => { } } }",
+        "missing variant(s) B",
+    );
+    expect_compile_error(
+        "fn main() { match 1 { 0 => { } } }",
+        "needs a final '_' arm",
+    );
+    expect_compile_error(
+        "fn main() { match true { true => { } } }",
+        "must cover both 'true' and 'false'",
+    );
+    expect_compile_error(
+        "enum E { A, B } fn main() { match E.A { _ => { } E.A => { } } }",
+        "unreachable pattern after '_'",
+    );
+    expect_compile_error(
+        "enum E { A, B } fn main() { match E.A { E.A => { } E.B => { } _ => { } } }",
+        "unreachable pattern",
+    );
+    expect_compile_error(
+        "enum E { A, B } fn main() { match E.A { E.A => { } E.A => { } E.B => { } } }",
+        "duplicate pattern",
+    );
+    // Patterns must fit the scrutinee.
+    expect_compile_error(
+        "enum E { A, B } fn main() { match E.A { 1 => { } _ => { } } }",
+        "pattern does not match the scrutinee type E",
+    );
+    expect_compile_error(
+        "enum E { A } enum F { X } fn main() { match E.A { F.X => { } } }",
+        "pattern does not match the scrutinee type E",
+    );
+    expect_compile_error(
+        "enum E { A } fn main() { match E.A { E.Y => { } } }",
+        "enum 'E' has no variant 'Y'",
+    );
+    expect_compile_error(
+        "fn main() { match \"s\" { _ => { } } }",
+        "cannot match on a value of type string",
+    );
+    expect_compile_error(
+        "fn f<T>(x: T) { match x { _ => { } } } fn main() { f(1); }",
+        "cannot match on a value of generic type T",
+    );
+    expect_compile_error(
+        "fn main() { let u: u8 = 1; match u { 300 => { } _ => { } } }",
+        "out of range for u8",
+    );
+    // Binder arity.
+    expect_compile_error(
+        "enum E { A(int) } fn main() { match E.A(1) { E.A => { } } }",
+        "wraps a value; bind it",
+    );
+    expect_compile_error(
+        "enum E { A } fn main() { match E.A { E.A(x) => { } } }",
+        "bare and has no value to bind",
+    );
+    // Construction arity.
+    expect_compile_error(
+        "enum E { A } fn main() { let e = E.A(); }",
+        "variant 'A' is bare",
+    );
+    expect_compile_error(
+        "enum E { A(int) } fn main() { let e = E.A; }",
+        "wraps a value; construct it as",
+    );
+    expect_compile_error(
+        "enum E { A(int) } fn main() { let e = E.A(1, 2); }",
+        "wraps exactly one value, got 2",
+    );
+    expect_compile_error(
+        "enum E { A(int) } fn main() { let e = E.A(\"s\"); }",
+        "type mismatch",
+    );
+    // Equality is only for bare-only enums.
+    expect_compile_error(
+        "enum E { A(int), B } fn main() { assert(E.B == E.B); }",
+        "'==' is not available on enum 'E'",
+    );
+    // Inference limits.
+    expect_compile_error(
+        "fn main() { let o = Option.None; }",
+        "cannot infer type parameter 'T' of enum 'Option'",
+    );
+    // Variants are qualified; a bare name is not in scope.
+    expect_compile_error(
+        "fn main() { let o: Option<int> = Some(5); }",
+        "unknown function 'Some'",
+    );
+    // Declarations.
+    expect_compile_error("enum E { } fn main() { }", "has no variants");
+    expect_compile_error(
+        "enum E { A, A } fn main() { }",
+        "duplicate variant 'A'",
+    );
+    expect_compile_error(
+        "enum E { A } enum E { B } fn main() { }",
+        "duplicate enum 'E'",
+    );
+    expect_compile_error(
+        "struct E { x: int } enum E { A } fn main() { }",
+        "same name as a struct",
+    );
+    expect_compile_error("enum u8 { A } fn main() { }", "shadows a primitive type");
+    // Field access and unwrap misuse.
+    expect_compile_error(
+        "enum E { A(int) } fn main() { let e = E.A(1); println(e.value); }",
+        "field access on non-struct type E",
+    );
+    expect_compile_error(
+        "fn main() { let x = unwrap(1); }",
+        "unwrap() needs an Option, found int",
+    );
+    // Match expressions need one common arm type and a value.
+    expect_compile_error(
+        "fn main() { let x = match 1 { 0 => 1, _ => \"s\" }; }",
+        "match arms have different types",
+    );
+    expect_compile_error(
+        "fn f() { } fn main() { let x = match 1 { 0 => f(), _ => f() }; }",
+        "match arms must produce a value",
+    );
+}
+
+#[test]
+fn enum_shadowing_rules() {
+    // A local shadows an enum name; the enum is unreachable in that scope.
+    expect_compile_error(
+        "enum E { A } fn main() { let E = 1; let e = E.A; }",
+        "field access on non-struct type int",
+    );
+    // A user Option shadows the prelude, which disables unwrap...
+    expect_compile_error(
+        "enum Option { Something } fn main() { let x = unwrap(Option.Something); }",
+        "unwrap() needs an Option",
+    );
+    // ...but the user type itself works normally.
+    check_ok(
+        r#"
+enum Option { Something, Nothing }
+fn main() {
+    let o = Option.Something;
+    assert(o == Option.Something && o != Option.Nothing);
+    println("ok");
+}
+"#,
+    );
+    // A user function named unwrap shadows the builtin.
+    check_ok(
+        r#"
+fn unwrap(x: int): int { x + 1 }
+fn main() {
+    assert(unwrap(1) == 2);
+    println("ok");
+}
+"#,
+    );
+}
+
+#[test]
+fn nil_is_gone() {
+    // `nil` is no longer part of the language; it is just an unbound name.
+    expect_compile_error(
+        "struct P { v: int } fn main() { let p: P = nil; }",
+        "unknown variable 'nil'",
+    );
+    expect_compile_error(
+        "fn main() { let s: string = nil; }",
+        "unknown variable 'nil'",
+    );
+}
+
+#[test]
+fn enum_inline_field_variants() {
+    check_ok(
+        r#"
+enum Tree { Branch { left: Tree, right: Tree, value: int }, Leaf }
+enum Mixed<T> { Pack { tag: u8, name: string, item: T, weight: float }, Nothing }
+fn build(depth: int, value: int): Tree {
+    if depth == 0 {
+        return Tree.Branch { left: Tree.Leaf, right: Tree.Leaf, value: value };
+    }
+    Tree.Branch {
+        left: build(depth - 1, value * 2),
+        right: build(depth - 1, value * 2 + 1),
+        value: value,
+    }
+}
+fn sum(t: Tree): int {
+    match t {
+        Tree.Branch { left, right, value } => { return value + sum(left) + sum(right); }
+        Tree.Leaf => { return 0; }
+    }
+}
+fn main() {
+    // Inline fields live in the enum object itself; deep trees of them
+    // survive relocation (the harness reruns with a 64 KiB nursery).
+    let t = build(10, 1);
+    gc_collect();
+    let expected = sum(t);
+    assert(expected == sum(build(10, 1)));
+
+    // Packed narrow fields around references inside a variant payload:
+    // the per-variant descriptor must be exact or the GC corrupts it.
+    let m = Mixed.Pack { tag: 7, name: "box", item: [1, 2, 3], weight: 2.5 };
+    gc_collect();
+    match m {
+        Mixed.Pack { tag: g, name: n, item: xs, weight: w } => {
+            assert(g == 7 && n == "box" && xs[2] == 3 && w == 2.5);
+        }
+        Mixed.Nothing => { assert(false); }
+    }
+
+    // Field order in literals and patterns is free; `field` alone is
+    // shorthand for `field: field`; `_` ignores a field's value.
+    let m2 = Mixed.Pack { weight: 1.0, item: "s", name: "n", tag: 2 };
+    match m2 {
+        Mixed.Pack { item, tag: _, weight: _, name: _ } => { assert(item == "s"); }
+        Mixed.Nothing => { }
+    }
+
+    // A bound reference field aliases the shared object.
+    let shared = [9];
+    match (Mixed.Pack { tag: 1, name: "a", item: shared, weight: 0.0 }) {
+        Mixed.Pack { item, tag: _, name: _, weight: _ } => { push(item, 10); }
+        Mixed.Nothing => { }
+    }
+    assert(len(shared) == 2 && shared[1] == 10);
+    println("ok");
+}
+"#,
+    );
+}
+
+#[test]
+fn enum_inline_field_errors() {
+    expect_compile_error(
+        "enum E { R { w: int } } fn main() { let e = E.R { w: 1, h: 2 }; }",
+        "variant 'R' has no field 'h'",
+    );
+    expect_compile_error(
+        "enum E { R { w: int, h: int } } fn main() { let e = E.R { w: 1 }; }",
+        "missing field 'h'",
+    );
+    expect_compile_error(
+        "enum E { R { w: int } } fn main() { let e = E.R { w: 1, w: 2 }; }",
+        "duplicate field 'w'",
+    );
+    expect_compile_error(
+        "enum E { R { w: int } } fn main() { let e = E.R(1); }",
+        "has named fields; construct it as",
+    );
+    expect_compile_error(
+        "enum E { R { w: int } } fn main() { let e = E.R; }",
+        "has named fields; construct it as",
+    );
+    expect_compile_error(
+        "enum E { A(int) } fn main() { let e = E.A { v: 1 }; }",
+        "wraps a value; construct it as",
+    );
+    expect_compile_error(
+        "enum E { A } fn main() { let e = E.A { v: 1 }; }",
+        "is bare; write",
+    );
+    expect_compile_error(
+        "enum E { R { w: int } } fn main() { match (E.R { w: 1 }) { E.R(x) => { } } }",
+        "has named fields; match it with",
+    );
+    expect_compile_error(
+        "enum E { R { w: int, h: int } } fn main() { match (E.R { w: 1, h: 2 }) { E.R { w: a } => { } } }",
+        "missing field 'h'",
+    );
+    expect_compile_error(
+        "enum E { R { w: int } } fn main() { match (E.R { w: 1 }) { E.R { q: a } => { } } }",
+        "variant 'R' has no field 'q'",
+    );
+    expect_compile_error(
+        "enum E { R { w: int, w: int } } fn main() { }",
+        "duplicate field 'w' in variant 'R'",
+    );
+    expect_compile_error("enum E { R { } } fn main() { }", "empty field list");
+    expect_compile_error(
+        "fn main() { let e = Nope.R { w: 1 }; }",
+        "unknown enum 'Nope'",
+    );
+    // == stays banned: field variants are not bare.
+    expect_compile_error(
+        "enum E { R { w: int }, B } fn main() { assert(E.B == E.B); }",
+        "'==' is not available on enum 'E'",
     );
 }

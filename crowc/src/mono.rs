@@ -23,7 +23,7 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Shape {
-    /// Any GC reference: string, struct, array, function, nil.
+    /// Any GC reference: string, struct, enum, array, function.
     Ref,
     /// 64-bit float (its own ABI register class).
     F64,
@@ -49,7 +49,9 @@ pub fn shape_of(t: &Type) -> Shape {
         Type::Int(IntKind::U16) => Shape::U16,
         Type::Int(IntKind::I8) => Shape::I8,
         Type::Int(IntKind::U8) => Shape::U8,
-        Type::Str | Type::Struct(..) | Type::Array(_) | Type::Fn(..) | Type::Nil => Shape::Ref,
+        Type::Str | Type::Struct(..) | Type::Enum(..) | Type::Array(_) | Type::Fn(..) => {
+            Shape::Ref
+        }
         Type::Unit | Type::Unknown | Type::Param(_) => {
             unreachable!("checker excluded {t:?} as a type argument")
         }
@@ -62,7 +64,7 @@ pub fn shape_of(t: &Type) -> Shape {
 /// for every type of that shape.
 pub fn canonical(s: Shape) -> Type {
     match s {
-        Shape::Ref => Type::Nil,
+        Shape::Ref => Type::Str,
         Shape::F64 => Type::Float,
         Shape::W64 => Type::Int(IntKind::I64),
         Shape::I32 => Type::Int(IntKind::I32),
@@ -189,6 +191,21 @@ impl Subst<'_> {
             Stmt::Return { value: Some(v), .. } => self.expr(v),
             Stmt::Return { value: None, .. } | Stmt::Break(_) | Stmt::Continue(_) => {}
             Stmt::Block(b) => self.block(b),
+            Stmt::Match { scrutinee, arms, .. } => {
+                self.expr(scrutinee);
+                for (pat, body) in arms {
+                    self.pattern(pat);
+                    self.block(body);
+                }
+            }
+        }
+    }
+
+    fn pattern(&mut self, pat: &mut Pattern) {
+        if let Pattern::Variant { args, .. } = pat {
+            for b in args.binders_mut() {
+                b.ty = b.ty.subst(self.args);
+            }
         }
     }
 
@@ -226,6 +243,25 @@ impl Subst<'_> {
                     self.expr(v);
                 }
             }
+            ExprKind::VariantLit { args, .. } => match args {
+                VariantArgs::Bare => {}
+                VariantArgs::Single(a) => self.expr(a),
+                VariantArgs::Fields(fields) => {
+                    for (_, v, _) in fields {
+                        self.expr(v);
+                    }
+                }
+            },
+            ExprKind::VariantStructLit { .. } => {
+                unreachable!("rewritten into VariantLit by the checker")
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                self.expr(scrutinee);
+                for (pat, body) in arms {
+                    self.pattern(pat);
+                    self.expr(body);
+                }
+            }
             ExprKind::Lambda(lam) => {
                 for cap in &mut lam.captures {
                     cap.ty = cap.ty.subst(self.args);
@@ -250,7 +286,6 @@ impl Subst<'_> {
             | ExprKind::Float(_)
             | ExprKind::Bool(_)
             | ExprKind::Str(_)
-            | ExprKind::Nil
             | ExprKind::Var { .. } => {}
         }
     }
