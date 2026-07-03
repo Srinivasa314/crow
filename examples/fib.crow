@@ -5,7 +5,7 @@ fn fib(n: int): int {
 
 fn main() {
     for (let i = 0; i <= 10; i = i + 1) {
-        print(itos(fib(i)) + " ");
+        print(fib(i).to_string() + " ");
     }
     println("");
     println(fib(30));

@@ -138,16 +138,20 @@ impl Parser {
         let mut structs = Vec::new();
         let mut enums = Vec::new();
         let mut funcs = Vec::new();
+        let mut methods = Vec::new();
         loop {
             match self.peek() {
                 Tok::Eof => break,
                 Tok::Struct => structs.push(self.struct_def()?),
                 Tok::Enum => enums.push(self.enum_def()?),
                 Tok::Fn => funcs.push(self.func_def()?),
-                _ => return self.err("expected 'fn', 'struct', or 'enum' at top level"),
+                Tok::Impl => self.impl_block(&mut funcs, &mut methods)?,
+                _ => {
+                    return self.err("expected 'fn', 'struct', 'enum', or 'impl' at top level")
+                }
             }
         }
-        Ok(Program { structs, enums, funcs })
+        Ok(Program { structs, enums, funcs, methods })
     }
 
     /// Optional `<T, U, ...>` type parameter list on a declaration.
@@ -238,7 +242,109 @@ impl Parser {
             None
         };
         let body = self.fn_body(ret.is_some())?;
-        Ok(FuncDef { name, type_params, params, ret, body, line, num_locals: 0 })
+        Ok(FuncDef { name, type_params, params, ret, body, line, num_locals: 0, is_method: false })
+    }
+
+    /// `impl Type<T, ...> { fn ... }`. Each function flattens into the
+    /// top-level function list as `Type.name`, with the impl's type
+    /// parameters prepended to the method's own and a `self` receiver
+    /// desugared to a first parameter of the impl type.
+    fn impl_block(
+        &mut self,
+        funcs: &mut Vec<FuncDef>,
+        methods: &mut Vec<MethodDef>,
+    ) -> PResult<()> {
+        self.expect(Tok::Impl)?;
+        let impl_line = self.line();
+        let type_name = self.ident()?;
+        let impl_params = self.type_params()?;
+        self.expect(Tok::LBrace)?;
+        while !self.eat(&Tok::RBrace) {
+            if self.peek() == &Tok::Eof {
+                return self.err("expected '}'");
+            }
+            if self.peek() != &Tok::Fn {
+                return self.err("expected 'fn' inside an impl block");
+            }
+            let line = self.line();
+            self.next();
+            let name = self.ident()?;
+            let own_params = self.type_params()?;
+            let mut type_params = impl_params.clone();
+            type_params.extend(own_params);
+            let (has_self, mut params) = self.method_params()?;
+            if has_self {
+                // The receiver is an ordinary first parameter of the impl
+                // type; its annotation is synthesized here so the checker
+                // resolves it like any other.
+                let targs: Vec<TypeExpr> = impl_params
+                    .iter()
+                    .map(|p| TypeExpr::Named(p.clone(), Vec::new(), impl_line))
+                    .collect();
+                params.insert(
+                    0,
+                    ("self".to_string(), TypeExpr::Named(type_name.clone(), targs, impl_line)),
+                );
+            }
+            let ret = if self.eat(&Tok::Colon) {
+                Some(self.type_expr()?)
+            } else {
+                None
+            };
+            let body = self.fn_body(ret.is_some())?;
+            methods.push(MethodDef {
+                type_name: type_name.clone(),
+                name: name.clone(),
+                func: funcs.len() as u32,
+                has_self,
+                impl_type_params: impl_params.len() as u32,
+                line,
+            });
+            funcs.push(FuncDef {
+                name: format!("{type_name}.{name}"),
+                type_params,
+                params,
+                ret,
+                body,
+                line,
+                num_locals: 0,
+                is_method: true,
+            });
+        }
+        Ok(())
+    }
+
+    /// Parameter list of an impl-block function: an optional leading bare
+    /// `self`, then ordinary `name: type` parameters. Returns whether the
+    /// receiver was present.
+    fn method_params(&mut self) -> PResult<(bool, Vec<(String, TypeExpr)>)> {
+        self.expect(Tok::LParen)?;
+        let mut has_self = false;
+        if self.peek() == &Tok::SelfKw {
+            self.next();
+            has_self = true;
+            if self.peek() == &Tok::Colon {
+                return self.err("'self' takes no type annotation");
+            }
+            if self.peek() != &Tok::RParen {
+                self.expect(Tok::Comma)?;
+            }
+        }
+        let mut params = Vec::new();
+        while self.peek() != &Tok::RParen {
+            if self.peek() == &Tok::SelfKw {
+                return self.err("'self' must be the first parameter");
+            }
+            let name = self.ident()?;
+            self.expect(Tok::Colon)?;
+            let ty = self.type_expr()?;
+            params.push((name, ty));
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(Tok::RParen)?;
+        Ok((has_self, params))
     }
 
     fn params(&mut self) -> PResult<Vec<(String, TypeExpr)>> {
@@ -811,6 +917,12 @@ impl Parser {
                     Ok(Expr::new(ExprKind::Var { name, res: None }, line))
                 }
             }
+            // `self` is an ordinary local inside a method; the checker
+            // rejects it anywhere else (no such variable is in scope).
+            Tok::SelfKw => {
+                self.next();
+                Ok(Expr::new(ExprKind::Var { name: "self".to_string(), res: None }, line))
+            }
             Tok::LParen => {
                 self.next();
                 let e = self.unrestricted(|p| p.expr())?;
@@ -1283,6 +1395,46 @@ fn main() { }
     }
 
     #[test]
+    fn impl_blocks() {
+        let p = parse_src(
+            r#"
+struct P { x: int }
+impl P {
+    fn mk(v: int): P { P { x: v } }
+    fn get(self): int { self.x }
+}
+impl Pair<T> { fn first(self): T { self.a } }
+fn main() { }
+"#,
+        )
+        .unwrap();
+        // Methods flatten into the function list as `Type.name`; a `self`
+        // receiver becomes a synthesized first parameter of the impl type.
+        assert_eq!(p.funcs[0].name, "P.mk");
+        assert!(p.funcs[0].is_method && !p.methods[0].has_self);
+        assert_eq!(p.funcs[1].name, "P.get");
+        assert_eq!(p.funcs[1].params[0].0, "self");
+        assert!(matches!(&p.funcs[1].params[0].1, TypeExpr::Named(n, a, _)
+            if n == "P" && a.is_empty()));
+        assert!(p.methods[1].has_self);
+        // The impl's type parameters are prepended to the method's own.
+        assert_eq!(p.funcs[2].type_params, vec!["T"]);
+        assert_eq!(p.methods[2].impl_type_params, 1);
+        assert!(matches!(&p.funcs[2].params[0].1, TypeExpr::Named(n, a, _)
+            if n == "Pair" && a.len() == 1));
+        // `self` is a keyword: usable in expressions, not as a binder.
+        assert!(parse_err("impl P { let x = 1; } fn main() { }")
+            .contains("expected 'fn' inside an impl block"));
+        assert!(parse_err("impl P { fn f(self: P) { } } fn main() { }")
+            .contains("'self' takes no type annotation"));
+        assert!(parse_err("impl P { fn f(a: int, self) { } } fn main() { }")
+            .contains("'self' must be the first parameter"));
+        assert!(parse_err("fn f(self) { } fn main() { }").contains("expected identifier"));
+        assert!(parse_err("fn main() { let self = 1; }").contains("expected identifier"));
+        assert!(parse_err("impl P { fn f(self) }").contains("expected"));
+    }
+
+    #[test]
     fn struct_literal_heuristic() {
         // `Ident {` is a struct literal when followed by `}` or `ident:`.
         let p = parse_src("fn main() { let p = P { x: 1 }; }").unwrap();
@@ -1372,7 +1524,8 @@ fn main() { }
         assert!(parse_err("fn main() { let x = ; }").contains("expected an expression"));
         assert!(parse_err("fn main() { let x: = 1; }").contains("expected a type"));
         assert!(parse_err("fn main() {").contains("expected '}'"));
-        assert!(parse_err("let x = 1;").contains("expected 'fn', 'struct', or 'enum' at top level"));
+        assert!(parse_err("let x = 1;")
+            .contains("expected 'fn', 'struct', 'enum', or 'impl' at top level"));
         assert!(parse_err("fn () {}").contains("expected identifier"));
         assert!(parse_err("fn main( {}").contains("expected identifier"));
         assert!(parse_err("struct P { x int }").contains("expected ':'"));

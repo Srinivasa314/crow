@@ -40,14 +40,27 @@ fn sum_list(list: Option<Node>): int {
     total
 }
 
-// match is also an expression: single-expression arms, one common type,
-// exhaustive. A tail match needs parens, like a tail if.
-fn area(s: Shape): float {
-    (match s {
-        Shape.Circle(r) => 3.0 * r * r,
-        Shape.Rect { w, h } => w * h,   // field patterns; `w` = `w: w`
-        Shape.Empty => 0.0,
-    })
+// Methods live in impl blocks; a bare `self` is the receiver. match is
+// also an expression: single-expression arms, one common type, exhaustive.
+// A tail match needs parens, like a tail if.
+impl Shape {
+    fn area(self): float {
+        (match self {
+            Shape.Circle(r) => 3.0 * r * r,
+            Shape.Rect { w, h } => w * h,   // field patterns; `w` = `w: w`
+            Shape.Empty => 0.0,
+        })
+    }
+}
+
+impl Point {
+    fn origin(): Point { Point { x: 0, y: 0 } }   // no self: Point.origin()
+    fn manhattan(self): int { self.x + self.y }
+}
+
+// impl blocks work on generic types too (repeat the type parameters).
+impl Pair<T> {
+    fn swap(self): Pair<T> { Pair { a: self.b, b: self.a } }
 }
 
 fn main() {
@@ -55,9 +68,17 @@ fn main() {
     println(sum_list(make_list(100)));     // 4950
     assert(sum_list(Option.None) == 0);
 
-    // enums with payloads, matched by qualified patterns
-    println(ftos(area(Shape.Circle(2.0))));                    // 12.0
-    println(ftos(area(Shape.Rect { w: 2.0, h: 3.0 })));       // 6.0
+    // enums with payloads, matched (inside the area method) by qualified
+    // patterns; methods are called with plain dot syntax
+    println(Shape.Circle(2.0).area().to_string());              // 12.0
+    println(Shape.Rect { w: 2.0, h: 3.0 }.area().to_string());  // 6.0
+
+    // associated functions are called through the type; a method used
+    // without a call is a *bound method*: a closure over its receiver
+    let o = Point.origin();
+    o.x = 3; o.y = 4;
+    let dist = o.manhattan;                // binds o
+    assert(o.manhattan() == 7 && dist() == 7);
 
     // bare variants are shared singletons: == is structural for them
     let c = Color.Green;
@@ -73,16 +94,16 @@ fn main() {
 
     // Option in the prelude; unwrap panics on None with a line number
     let hit = make_list(3);
-    assert(unwrap(hit).value == 2);
+    assert(hit.unwrap().value == 2);
 
     // arrays: literals, push/pop/len, indexing, nesting, aliasing
     let xs = [1, 2, 3];
-    push(xs, 4);
-    assert(pop(xs) == 4 && len(xs) == 3);
+    xs.push(4);
+    assert(xs.pop() == 4 && xs.len() == 3);
     xs[1] *= 100;                          // compound assignment on elements
     let alias = xs;                        // arrays are references:
-    for (let i = 0; i < 100; i += 1) { push(alias, i); }
-    assert(len(xs) == 103);                // aliases survive reallocation
+    for (let i = 0; i < 100; i += 1) { alias.push(i); }
+    assert(xs.len() == 103);                // aliases survive reallocation
     let grid = [[1, 2], [3, 4]];
     println(grid[1][0] + xs[1]);           // 203
 
@@ -107,7 +128,7 @@ fn main() {
     let funcs: [fn(int): int] = [];
     for (let i = 0; i < 3; i += 1) {
         let k = i * 10;
-        push(funcs, fn(x: int): int { x + k });
+        funcs.push(fn(x: int): int { x + k });
     }
     // ...but a captured reference still aims at the shared object:
     let counter = Point { x: 0, y: 0 };
@@ -128,22 +149,22 @@ fn main() {
     // strings: immutable, concat, multiline literals, unicode escapes
     let s = "a";
     for (let i = 0; i < 5; i += 1) { s += s; }
-    println(len(s));                       // 32
+    println(s.len());                       // 32
     println("strings span
 lines, and \u{2192} escapes \u{1F600}");
 
     // byte literals and byte indexing: s[i] is the i-th byte, a u8
     let word = "crow";
     assert(word[0] == b'c' && (word[2] - b'a') as int == 14);
-    assert(len("é") == 2);                 // strings are UTF-8: byte length
-    let bs = stob(word);                   // string <-> bytes copies, so
+    assert("é".len() == 2);                 // strings are UTF-8: byte length
+    let bs = word.to_bytes();                   // string <-> bytes copies, so
     bs[0] -= 32;                           // the string stays untouched
-    println(btos(bs) + word);              // Crowcrow (btos checks UTF-8)
+    println(bs.to_string() + word);              // Crowcrow (btos checks UTF-8)
     println(match word[0] { b'c' => "caw", _ => "?" });   // byte patterns
 
     // number <-> string conversions (stoi/stof are strict: bad input panics)
-    println(itos(stoi("-42") + 42) + "/" + ftos(stof("2.5") * itof(4)));
-    assert(ftoi(9.9) == 9);                // float -> int truncates, checked
+    println(("-42".to_int() + 42).to_string() + "/" + ("2.5".to_float() * 4.to_float()).to_string());
+    assert(9.9 as int == 9);               // float -> int truncates, checked
 
     // sized integers: no implicit mixing, literals adopt the context type
     let byte: u8 = 200;
@@ -154,7 +175,7 @@ lines, and \u{2192} escapes \u{1F600}");
     let tiny: i8 = -128;
     assert(tiny as i16 - 1 == -129 && 3.99 as int == 3);
     let packed: [u8] = [1, 2, 3];          // packed: one byte per element
-    push(packed, 255);
+    packed.push(255);
     assert(packed[3] == 255);
 
     // bitwise and shifts bind tighter than comparison: 6 & 1 == 0 just works
@@ -175,9 +196,10 @@ lines, and \u{2192} escapes \u{1F600}");
     // generics in action: T inferred from arguments or the expected type
     assert(id(42) == 42 && id("generic") == "generic");
     let pr = Pair { a: 1, b: 2 };
+    assert(pr.swap().a == 2);              // methods on generic types
     let names: [string] = empty();
-    push(names, "crow");
-    println(itos(pr.a * 10 + pr.b) + first(names));   // 12crow
+    names.push("crow");
+    println((pr.a * 10 + pr.b).to_string() + first(names));   // 12crow
 
     // the GC can be forced; everything above survives relocation
     gc_collect();

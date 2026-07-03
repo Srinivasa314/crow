@@ -56,12 +56,12 @@ fn main() {
     // Long-lived trees to force major collections.
     let keep: [Tree] = [];
     for (let round = 0; round < 50; round = round + 1) {
-        push(keep, build_tree(10, 1));
+        keep.push(build_tree(10, 1));
         let throwaway = build_tree(12, 1);
         assert(tree_sum(throwaway) > 0);
     }
     let expected = tree_sum(keep[0]);
-    for (let i = 0; i < len(keep); i = i + 1) {
+    for (let i = 0; i < keep.len(); i = i + 1) {
         assert(tree_sum(keep[i]) == expected);
     }
     println(expected);
@@ -69,10 +69,10 @@ fn main() {
     // Strings churn through the nursery too.
     let words: [string] = [];
     for (let i = 0; i < 5000; i = i + 1) {
-        push(words, itos(i));
+        words.push(i.to_string());
     }
     assert(words[4999] == "4999");
-    println(len(words));
+    println(words.len());
 
     gc_collect();
     println(checksum(survivor) > 0);

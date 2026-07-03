@@ -6,7 +6,7 @@
 // djb2-style rolling hash reduced mod 2^32.
 fn hash32(data: [u8]): u32 {
     let h: u64 = 5381;
-    for (let i = 0; i < len(data); i = i + 1) {
+    for (let i = 0; i < data.len(); i = i + 1) {
         h = (h * 33 + data[i] as u64) % 4294967296;
     }
     return h as u32;
@@ -25,9 +25,9 @@ fn main() {
     let rng = Rng { state: 42 };
     let data: [u8] = [];
     for (let i = 0; i < 1024; i = i + 1) {
-        push(data, (next(rng) % 256) as u8);
+        data.push((next(rng) % 256) as u8);
     }
-    println(len(data));
+    println(data.len());
     println(hash32(data));
 
     // Signed narrow types: i8 comfortably holds a year of temperatures.
@@ -35,7 +35,7 @@ fn main() {
     let lo: i8 = 127;
     let hi: i8 = -128;
     let sum = 0;
-    for (let i = 0; i < len(temps); i = i + 1) {
+    for (let i = 0; i < temps.len(); i = i + 1) {
         let t = temps[i];
         if t < lo { lo = t; }
         if t > hi { hi = t; }
@@ -43,7 +43,7 @@ fn main() {
     }
     println(lo);
     println(hi);
-    println(sum / len(temps));
+    println(sum / temps.len());
 
     // u64 reaches where int cannot; comparisons and division are unsigned.
     let big: u64 = 18446744073709551615;   // u64::MAX

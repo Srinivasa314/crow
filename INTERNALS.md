@@ -44,6 +44,28 @@ type parameters, because equality is type-directed (identity for references,
 content for strings) and a shared reference-shape body could not pick
 between them.
 
+## Methods
+
+Methods are entirely a front-end construct. The parser flattens each impl
+block into ordinary top-level functions named `Type.method` — a name no
+identifier can spell, so no collision with user functions — with `self`
+desugared to a first parameter of the impl type and the impl's type
+parameters prepended to the method's own. The checker keeps a
+`(type, name) → function` table; a method call `x.m(a)` type-checks the
+receiver once, then rewrites into a direct call `Type.m(x, a)`, so
+monomorphization and codegen never know methods exist: an `impl Pair<T>`
+method is just a generic function whose first parameter drives inference,
+and it shares instantiations by shape like any other. Builtin "methods"
+(`len`, `push`, `to_string`, ...) are the same checker rewrite targeting
+the old builtin operations.
+
+A *bound method* (`x.m` with no call) compiles like a one-capture lambda:
+a fresh closure `[code pointer, receiver]` whose code is a per-(method,
+shape) **bind thunk** that loads the receiver back out of the environment
+and calls the method directly. Since a receiver is always a reference, all
+bind closures share one static GC descriptor (two payload words, refmap
+`0b10`).
+
 ## Object model
 
 Every heap object has a 16-byte header followed by 8-byte payload words:

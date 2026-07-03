@@ -252,6 +252,12 @@ impl Subst<'_> {
                     }
                 }
             },
+            ExprKind::BoundMethod { obj, inst, .. } => {
+                for t in inst.iter_mut() {
+                    *t = t.subst(self.args);
+                }
+                self.expr(obj);
+            }
             ExprKind::VariantStructLit { .. } => {
                 unreachable!("rewritten into VariantLit by the checker")
             }

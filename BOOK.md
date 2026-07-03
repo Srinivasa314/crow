@@ -20,8 +20,8 @@ crowc run  prog.crow                 # compile + run
 crowc build prog.crow -o prog        # produce a native executable
 ```
 
-A program is one file: a sequence of top-level `struct` and `fn` declarations
-in any order (no forward declarations needed), with entry point `fn main()`.
+A program is one file: a sequence of top-level `struct`, `enum`, `impl`, and
+`fn` declarations in any order (no forward declarations needed), with entry point `fn main()`.
 Nothing else is allowed at top level — no globals, no top-level statements.
 
 Memory is garbage-collected: you never allocate or free anything by hand.
@@ -68,7 +68,7 @@ size (`[u8]` is a real byte buffer, `bool` is one byte).
 **There is no null.** Every reference always points at a real object, so
 field access, indexing, and calls can never fail on a missing value. Absence
 is a value of the predeclared `Option<T>` enum — `Option.Some(v)` or
-`Option.None` — eliminated with `match` or `unwrap` (§9).
+`Option.None` — eliminated with `match` or `.unwrap()` (§9).
 
 ## 4. Integers
 
@@ -198,7 +198,7 @@ fn make_adder(n: int): fn(int): int {
 
 Lambdas **capture by value at creation time**. Assigning to a captured
 variable is a compile error; mutating *through* a captured reference
-(`captured.field = ...`, `push(captured, ...)`) works, because references
+(`captured.field = ...`, `captured.push(...)`) works, because references
 are copied but point at the same object.
 
 ## 8. Structs
@@ -210,8 +210,9 @@ let n = Node { value: 1, next: Option.None };    // literal: all fields, by name
 n.value = 2;                                     // field read/write with .
 ```
 
-No methods, no visibility modifiers, no default values, no inheritance.
-Struct values are references; `a = b` aliases.
+Declarations are pure data: no visibility modifiers, no default values, no
+inheritance. Methods live in separate `impl` blocks (§10). Struct values
+are references; `a = b` aliases.
 
 ## 9. Enums and match
 
@@ -267,7 +268,7 @@ rule as `if`, §6), so a tail match-expression needs parens:
 `fn area(s: Shape): float { (match s { ... }) }` — or write `return match ...;`.
 
 `match` also works on **integers and bools**: arms are literals (including
-`b'X'` byte literals against a `u8` scrutinee, §15). An integer match needs
+`b'X'` byte literals against a `u8` scrutinee, §16). An integer match needs
 a final `_` arm; a bool match is complete once `true` and `false` are both
 covered.
 
@@ -288,32 +289,101 @@ enum Option<T> { Some(T), None }
 
 It replaces null everywhere: a recursive type spells its base case as
 `Option.None` (`struct Node { value: int, next: Option<Node> }`), lookups
-return `Option.None` for "not found", and `unwrap(o)` (§13) extracts the
+return `Option.None` for "not found", and `o.unwrap()` (§14) extracts the
 `Some` payload, panicking on `None` with a line number. A user type named
 `Option` shadows the prelude.
 
-## 10. Arrays
+## 10. Methods
+
+Methods are declared in `impl` blocks, Rust-style, on any struct or enum:
+
+```
+struct Point { x: int, y: int }
+
+impl Point {
+    fn new(x: int, y: int): Point { Point { x: x, y: y } }   // no self
+    fn norm2(self): int { self.x * self.x + self.y * self.y }
+    fn translate(self, dx: int, dy: int) {
+        self.x += dx;
+        self.y += dy;
+    }
+}
+
+let p = Point.new(3, 4);      // associated function: called via the type
+let n = p.norm2();            // method: called via a value
+p.translate(1, 1);            // self aliases p — the mutation is visible
+```
+
+- The receiver is a bare **`self`** as the first parameter — no type
+  annotation (`self` is a keyword, usable only in impl-block functions).
+  Like every reference, `self` aliases the caller's object, so mutating
+  through it is visible outside; there is no `&self`/`&mut self`
+  distinction to spell.
+- A function **without** `self` is an **associated function**, called as
+  `Point.new(...)` — the usual home for constructors. On an enum, variant
+  names win over associated functions and the two may not collide.
+- A type may have **several impl blocks**; across all of them a method
+  name must be unique and (on a struct) must not collide with a field name.
+- Enums get methods the same way — typically a `match self` inside.
+
+**Generic types** repeat their type parameters on the impl header, and a
+method may add its own after them:
+
+```
+struct Pair<T> { a: T, b: T }
+
+impl Pair<T> {
+    fn swap(self): Pair<T> { Pair { a: self.b, b: self.a } }
+    fn map<U>(self, f: fn(T): U): Pair<U> { Pair { a: f(self.a), b: f(self.b) } }
+}
+```
+
+The impl's parameters are inferred from the receiver; a method's own
+parameters are inferred from its arguments, like any generic call (§13).
+
+**Bound methods**: naming a method without calling it builds a closure
+that captures the receiver:
+
+```
+let f = p.norm2;      // fn(): int, capturing p
+assert(f() == p.norm2());
+```
+
+The receiver is captured like a lambda capture: the reference is copied,
+the object is shared. Each evaluation of `p.norm2` allocates a fresh
+closure, so `p.norm2 == p.norm2` is false (function equality is identity,
+§7). Two things cannot be bound: associated functions and builtin methods
+(call-only), and methods whose *own* type parameters aren't determined by
+the receiver (`p.map` above — nothing pins `U`).
+
+One resolution rule worth knowing: `p.f(...)` is a method call when a
+method `f` exists; otherwise `p.f` must be a field, and if that field
+holds a function value the call goes through it. Field and method names
+can never collide, so the two cases never compete.
+
+## 11. Arrays
 
 ```
 let xs = [1, 2, 3];          // inferred [int]
 let ys: [string] = [];       // empty literal needs a context type
 xs[0] = 10;                  // bounds-checked; panics if out of range
-push(xs, 4);                 // append (may reallocate; aliases stay valid)
-let last = pop(xs);          // remove + return last (panics if empty)
-len(xs);
+xs.push(4);                  // append (may reallocate; aliases stay valid)
+let last = xs.pop();         // remove + return last (panics if empty)
+xs.len();
 let grid = [[1, 2], [3, 4]]; // nest freely
 ```
 
 No slices, no array literals with a repeat count, no negative indexing.
 
-## 11. Strings and bytes
+## 12. Strings and bytes
 
-Immutable. `+` concatenates, `==` compares content, `len` gives byte length.
+Immutable. `+` concatenates, `==` compares content, `s.len()` gives byte
+length.
 
 **Byte indexing**: `s[i]` is the `i`-th **byte** of the string, of type
 `u8`, bounds-checked like arrays. Strings are UTF-8, so a multi-byte
 character is several bytes; the language never decodes at runtime. Compare
-bytes against `b'X'` byte literals (§15):
+bytes against `b'X'` byte literals (§16):
 
 ```
 if s[0] == b'-' { ... }
@@ -321,25 +391,25 @@ let digit = (s[i] - b'0') as int;
 ```
 
 Writing through an index (`s[i] = ...`) is a compile error — strings stay
-immutable. To *transform* text, round-trip through bytes: `stob(s)` copies
-the string's bytes into a fresh `[u8]`, and `btos(bs)` builds a new string
-from a byte array — panicking if the bytes are not valid UTF-8, so every
-string a program can observe remains valid UTF-8:
+immutable. To *transform* text, round-trip through bytes: `s.to_bytes()`
+copies the string's bytes into a fresh `[u8]`, and `bs.to_string()` builds
+a new string from a byte array — panicking if the bytes are not valid
+UTF-8, so every string a program can observe remains valid UTF-8:
 
 ```
 fn upper(s: string): string {
-    let bs = stob(s);
-    for (let i = 0; i < len(bs); i += 1) {
+    let bs = s.to_bytes();
+    for (let i = 0; i < bs.len(); i += 1) {
         if bs[i] >= b'a' && bs[i] <= b'z' { bs[i] -= 32; }
     }
-    btos(bs)
+    bs.to_string()
 }
 ```
 
-No slicing, no interpolation — build strings with `+`, `itos`, `ftos`,
-`btos`; parse them with `s[i]`, `stoi`, `stof`, `stob`.
+No slicing, no interpolation — build strings with `+` and `.to_string()`;
+parse them with `s[i]`, `.to_int()`, `.to_float()`, `.to_bytes()`.
 
-## 12. Generics
+## 13. Generics
 
 ```
 fn id<T>(x: T): T { x }
@@ -359,52 +429,65 @@ let xs: [string] = empty();         // ...or from the expected type
 (Instantiations are shared aggressively under the hood — see
 [INTERNALS.md](INTERNALS.md) if you're curious how.)
 
-## 13. Builtins
+## 14. Builtins
 
-Ordinary call syntax; user definitions with the same name shadow them.
-Builtins can only be called, not used as values.
+Almost every built-in operation is a **method** on its receiver type; only
+the four with no natural receiver are free functions:
 
-| Builtin | Does |
+| Free function | Does |
 |---|---|
 | `println(x)` / `print(x)` | any integer type, `float`, `bool`, `string` |
-| `len(x)` | string byte length / array length |
-| `push(arr, v)` / `pop(arr)` | grow / shrink array |
-| `itos(i)` / `ftos(f)` | number → string |
-| `itof(i)` / `ftoi(f)` | int ↔ float (`ftoi` = `as int`, checked) |
-| `stoi(s)` / `stof(f)` | string → number; **panics** on malformed input |
-| `stob(s)` / `btos(bs)` | string ↔ `[u8]` (both copy; `btos` **panics** on invalid UTF-8) |
-| `unwrap(o)` | `Option<T>` → `T`; **panics** on `Option.None` |
 | `assert(cond)` | panic if false |
 | `gc_collect()` | force a full collection |
 
-`stoi` accepts an optional leading `-` followed by decimal digits, matching
-the whole string — no whitespace, no `+`. `stof` accepts decimal or
-scientific notation (again with `-` only), and the result must be finite.
-Anything else panics with the offending text and line number; validate
-first with `s[i]` when input is untrusted.
+| Builtin method | On | Does |
+|---|---|---|
+| `x.len()` | `string`, `[T]` | byte length / element count |
+| `arr.push(v)` / `arr.pop()` | `[T]` | grow / shrink (`pop` **panics** when empty) |
+| `o.unwrap()` | `Option<T>` | the `Some` payload; **panics** on `Option.None` |
+| `i.to_string()` | any integer | decimal text (unsigned types print unsigned) |
+| `f.to_string()` | `float` | decimal text |
+| `i.to_float()` | any integer | exact-ish conversion (float → int is `f as int`, §4) |
+| `s.to_int()` / `s.to_float()` | `string` | parse; **panics** on malformed input |
+| `s.to_bytes()` | `string` | copy the bytes into a fresh `[u8]` |
+| `bs.to_string()` | `[u8]` | build a string; **panics** on invalid UTF-8 |
 
-## 14. When things go wrong
+`s.to_int()` accepts an optional leading `-` followed by decimal digits,
+matching the whole string — no whitespace, no `+`. `s.to_float()` accepts
+decimal or scientific notation (again with `-` only), and the result must
+be finite. Anything else panics with the offending text and line number;
+validate first with `s[i]` when input is untrusted.
+
+Shadowing: a user function shadows a free builtin of the same name, and a
+user *method* (on your own type — including a shadowing `Option`) shadows
+a builtin method. Builtin methods and free builtins can only be called,
+not used as values. One wrinkle: a receiver is checked without an expected
+type, so a bare array literal is `[int]` — annotate before calling
+`[u8]`-only methods (`let bs: [u8] = [104, 105]; bs.to_string()`).
+
+## 15. When things go wrong
 
 Every error path panics with a **line number**; there is no undefined
 behavior:
 
-- array or string index out of bounds; `pop` on empty
-- `unwrap` of `Option.None`
+- array or string index out of bounds; `.pop()` on empty
+- `.unwrap()` of `Option.None`
 - integer overflow, `/ 0`, `% 0`, `MIN / -1`, `-MIN`
 - shift amount out of `[0, bits)`
 - out-of-range `as` casts (including float → int)
-- `stoi` / `stof` on malformed input; `btos` on invalid UTF-8
+- `.to_int()` / `.to_float()` on malformed input; `.to_string()` on a
+  `[u8]` that is not valid UTF-8
 - runaway recursion: `stack overflow at line N`
 
 A panic prints its message to stderr and exits with code 101. Panics are
 not catchable — there are no exceptions.
 
-## 15. Appendix: lexical structure
+## 16. Appendix: lexical structure
 
 - **Comments**: `// line` and `/* block */`. Block comments **nest**.
 - **Identifiers**: `[A-Za-z_][A-Za-z0-9_]*`.
-- **Keywords**: `fn struct enum match let if else while for return break
-  continue true false as`.
+- **Keywords**: `fn struct enum impl self match let if else while for
+  return break continue true false as`.
 - **Integer literals**: decimal only. Untyped until context types them
   (§4); default `int`.
 - **Float literals**: `4.5` — a `.` with digits makes it a float.
@@ -419,13 +502,16 @@ not catchable — there are no exceptions.
   `{ ... }` and are required for all control-flow bodies (no braceless
   `if`).
 
-## 16. Appendix: grammar sketch
+## 17. Appendix: grammar sketch
 
 ```
-program   := (struct | enum | func)*
+program   := (struct | enum | impl | func)*
 struct    := "struct" IDENT generics? "{" (IDENT ":" type),* "}"
 enum      := "enum" IDENT generics? "{" (IDENT payload?),* "}"
 payload   := "(" type ")" | "{" (IDENT ":" type),* "}"
+impl      := "impl" IDENT generics? "{" method* "}"
+method    := "fn" IDENT generics? "(" mparams ")" (":" type)? fbody
+mparams   := "self" ("," IDENT ":" type)* | (IDENT ":" type),*
 func      := "fn" IDENT generics? "(" (IDENT ":" type),* ")" (":" type)? fbody
 generics  := "<" IDENT,+ ">"
 type      := "int" | "i8".."u64" | "float" | "bool" | "string"
@@ -443,14 +529,16 @@ assign_op := "=" | "+=" | "-=" | "*=" | "/=" | "%="
            | "&=" | "|=" | "^=" | "<<=" | ">>="
 cond      := expr            // no leading struct literal unless parenthesized
 expr      := precedence chain of §5 over:
-             literal | IDENT | "(" expr ")"
+             literal | IDENT | "self" | "(" expr ")"
            | IDENT "{" (IDENT ":" expr),* "}"        // struct literal
-           | IDENT "." IDENT ("(" expr ")")?         // enum variant (checker-resolved)
+           | IDENT "." IDENT ("(" expr,* ")")?       // enum variant / assoc fn (checker-resolved)
            | IDENT "." IDENT "{" (IDENT ":" expr),* "}"   // field-variant literal
            | "[" expr,* "]"                          // array literal
            | "fn" "(" params ")" (":" type)? fbody   // lambda
            | if_expr | match_expr
-           | expr "(" args ")" | expr "[" expr "]" | expr "." IDENT
+           | expr "(" args ")" | expr "[" expr "]"
+           | expr "." IDENT                          // field / bound method
+           | expr "." IDENT "(" args ")"             // method call
            | expr "as" type
 if_expr   := "if" cond "{" expr "}" "else" (if_expr | "{" expr "}")
 match_expr:= "match" cond "{" (pattern "=>" expr),* "}"
@@ -459,10 +547,10 @@ pattern   := IDENT "." IDENT pargs?               // qualified variant
 pargs     := "(" IDENT ")" | "{" (IDENT (":" IDENT)?),* "}"
 ```
 
-## 17. What Crow deliberately doesn't have
+## 18. What Crow deliberately doesn't have
 
-Modules/imports, methods, traits/interfaces, operator overloading,
-exceptions (panics only, non-catchable), null (absence is `Option<T>`),
-nested match patterns (one constructor deep only), string
-slicing/interpolation, hash maps, and any form of manual memory management.
-One file in, one binary out.
+Modules/imports, traits/interfaces, operator overloading, exceptions
+(panics only, non-catchable), null (absence is `Option<T>`), nested match
+patterns (one constructor deep only), string slicing/interpolation, hash
+maps, and any form of manual memory management. One file in, one binary
+out.

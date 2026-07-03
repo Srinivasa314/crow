@@ -82,6 +82,7 @@ pub fn compile(program: &Program, checked: &Checked) -> Result<Vec<u8>, String> 
         struct_insts: HashMap::new(),
         variant_singletons: HashMap::new(),
         variant_insts: HashMap::new(),
+        bind_thunk_ids: HashMap::new(),
         desc_cache: HashMap::new(),
         worklist: Vec::new(),
         closure0_desc: None,
@@ -218,6 +219,7 @@ fn collect_lambdas(block: &Block) -> Vec<&LambdaDef> {
                 out.push(lam);
                 walk_block(&lam.body, out);
             }
+            ExprKind::BoundMethod { obj, .. } => walk_expr(obj, out),
             _ => {}
         }
     }
@@ -343,6 +345,10 @@ struct Codegen<'a> {
     /// Payload layouts + descriptors of wrapping variants, keyed by
     /// (enum id, tag, arg shapes) — the enum analog of `struct_insts`.
     variant_insts: HashMap<(u32, u32, Vec<Shape>), StructInst>,
+    /// Bound-method adapters, keyed by (method function id, arg shapes):
+    /// the code pointer stored in a `expr.method` closure, which unpacks
+    /// the receiver from the environment and calls the method.
+    bind_thunk_ids: HashMap<(u32, Vec<Shape>), FuncId>,
     /// Descriptors are pure (kind, size, refmap) data, so every object shape
     /// shares one descriptor no matter which struct, closure, or generic
     /// instantiation produced it.
@@ -614,6 +620,13 @@ impl<'a> Codegen<'a> {
                 .declare_function(&format!("crow_fn.{}", f.name), Linkage::Local, &sig)
                 .map_err(|e| e.to_string())?;
             self.func_ids.push(Some(id));
+            // Methods are never plain function values (a bound method builds
+            // its own closure via a bind thunk), so they need no thunk or
+            // static closure object.
+            if f.is_method {
+                self.thunk_ids.push(None);
+                continue;
+            }
             let tsig = self.make_sig(&s.params, &s.ret, true);
             let tid = self
                 .module
@@ -622,6 +635,62 @@ impl<'a> Codegen<'a> {
             self.thunk_ids.push(Some(tid));
         }
         Ok(())
+    }
+
+    /// The code pointer stored in a bound-method closure: adapts the closure
+    /// calling convention (env first) to the method by loading the captured
+    /// receiver out of the environment. One per (method, argument shapes),
+    /// defined on first use.
+    fn bind_thunk(&mut self, fid: u32, targs: &[CrowType]) -> Result<FuncId, String> {
+        let key = (fid, targs.iter().map(shape_of).collect::<Vec<_>>());
+        if let Some(&id) = self.bind_thunk_ids.get(&key) {
+            return Ok(id);
+        }
+        let shapes = key.1.clone();
+        let canon: Vec<CrowType> = shapes.iter().map(|s| canonical(*s)).collect();
+        let (params, ret) = {
+            let sig = &self.checked.funcs[fid as usize];
+            (
+                sig.params.iter().map(|t| t.subst(&canon)).collect::<Vec<_>>(),
+                sig.ret.subst(&canon),
+            )
+        };
+        let target = if shapes.is_empty() {
+            self.func_ids[fid as usize].expect("monomorphic method declared")
+        } else {
+            self.instance_func_id(fid, targs)?
+        };
+        let sig = self.make_sig(&params[1..], &ret, true);
+        let name = format!("crow_bind.{}{}", self.program.funcs[fid as usize].name, suffix(&shapes));
+        let id = self
+            .module
+            .declare_function(&name, Linkage::Local, &sig)
+            .map_err(|e| e.to_string())?;
+        let mut ctx = self.module.make_context();
+        ctx.func.signature = sig;
+        let mut fb_ctx = FunctionBuilderContext::new();
+        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let block_params = b.block_params(entry).to_vec();
+        // The receiver is the closure's only capture (field 1; field 0 is
+        // this code pointer).
+        let env = block_params[0];
+        let recv = b.ins().load(types::I64, MemFlags::trusted(), env, HEADER + 8);
+        let mut args = vec![recv];
+        args.extend_from_slice(&block_params[1..]);
+        let callee = self.module.declare_func_in_func(target, b.func);
+        let call = b.ins().call(callee, &args);
+        let results = b.inst_results(call).to_vec();
+        b.ins().return_(&results);
+        b.seal_all_blocks();
+        b.finalize();
+        self.module
+            .define_function(id, &mut ctx)
+            .map_err(|e| format!("bind thunk: {e}"))?;
+        self.bind_thunk_ids.insert(key, id);
+        Ok(id)
     }
 
     /// Thunks adapt the closure calling convention (extra env argument) to a
@@ -956,6 +1025,9 @@ fn makes_crow_calls(block: &Block) -> bool {
             ExprKind::Match { scrutinee, arms } => {
                 in_expr(scrutinee) || arms.iter().any(|(_, body)| in_expr(body))
             }
+            // Building the bound closure only calls the runtime allocator;
+            // the method itself runs later, through an ordinary call.
+            ExprKind::BoundMethod { obj, .. } => in_expr(obj),
             ExprKind::Lambda(_)
             | ExprKind::Int(_)
             | ExprKind::Byte(_)
@@ -1791,6 +1863,32 @@ impl FnCompiler<'_, '_> {
                 }
                 obj_cv
             }
+            // A bound method: a fresh two-word closure [code pointer,
+            // receiver] whose code is the method's bind thunk. Same layout
+            // as a one-capture lambda.
+            ExprKind::BoundMethod { obj, fid, inst } => {
+                let thunk = self.cg.bind_thunk(*fid, inst)?;
+                // Receivers are always references, so the capture refmap is
+                // exactly bit 1 (bit 0 is the code pointer word).
+                let desc_id = self.cg.desc(KIND_STRUCT, 16, 0b10)?;
+                let gv = self.cg.module.declare_data_in_func(desc_id, self.b.func);
+                let desc = self.b.ins().global_value(types::I64, gv);
+                let zero = self.b.ins().iconst(types::I64, 0);
+                let clo = self.call_rt(Rt::Alloc, &[desc, zero]).unwrap();
+                let clo_cv = self.root(clo);
+                let fref = self.cg.module.declare_func_in_func(thunk, self.b.func);
+                let fnptr = self.b.ins().func_addr(types::I64, fref);
+                let clo_v = self.value_of(clo_cv);
+                self.b.ins().store(MemFlags::trusted(), fnptr, clo_v, HEADER);
+                // The receiver may allocate while evaluating; the closure is
+                // rooted, so re-fetch it afterwards.
+                let recv_cv = self.gen_expr(obj)?;
+                let recv = self.value_of(recv_cv);
+                let clo_v = self.value_of(clo_cv);
+                let addr = self.b.ins().iadd_imm(clo_v, (HEADER + 8) as i64);
+                self.call_rt(Rt::WriteRef, &[clo_v, addr, recv]);
+                clo_cv
+            }
         })
     }
 
@@ -2265,11 +2363,6 @@ impl FnCompiler<'_, '_> {
                 } else {
                     CV::Scalar(self.b.ins().fcvt_from_uint(types::F64, v))
                 }
-            }
-            Builtin::Ftoi => {
-                // Same semantics as `expr as int`: panic when out of range.
-                let v = self.gen_scalar(&args[0])?;
-                CV::Scalar(self.gen_cast(&CrowType::Float, &CrowType::Int(IntKind::I64), v, line))
             }
             Builtin::Stoi | Builtin::Stof => {
                 let cv = self.gen_expr(&args[0])?;

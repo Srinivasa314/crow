@@ -12,15 +12,17 @@ enum Shape {
     Rect { w: float, h: float },    
 }
 
-fn area(s: Shape): float {
-    (match s {
-        Shape.Circle(r) => 3.14159 * r * r,
-        Shape.Rect { w, h } => w * h,
-    })
+impl Shape {
+    fn area(self): float {
+        (match self {
+            Shape.Circle(r) => 3.14159 * r * r,
+            Shape.Rect { w, h } => w * h,
+        })
+    }
 }
 
 fn find<T>(xs: [T], want: fn(T): bool): Option<T> {
-    for (let i = 0; i < len(xs); i += 1) {
+    for (let i = 0; i < xs.len(); i += 1) {
         if want(xs[i]) { return Option.Some(xs[i]); }
     }
     Option.None
@@ -29,13 +31,13 @@ fn find<T>(xs: [T], want: fn(T): bool): Option<T> {
 fn main() {
     let shapes = [Shape.Circle(1.5), Shape.Rect { w: 4.0, h: 5.0 }];
     let min = 10.0;                                  
-    match find(shapes, fn(s: Shape): bool { area(s) > min }) {
-        Option.Some(s) => { println("found: " + ftos(area(s))); }    // found: 20.0
-        Option.None => { println("all smaller than " + ftos(min)); }
+    match find(shapes, fn(s: Shape): bool { s.area() > min }) {
+        Option.Some(s) => { println("found: " + s.area().to_string()); }    // found: 20.0
+        Option.None => { println("all smaller than " + min.to_string()); }
     }
 
-    let name = find(["crow", "raven", "rook"], fn(n: string): bool { len(n) == 4 });
-    println(unwrap(name));                           // crow
+    let name = find(["crow", "raven", "rook"], fn(n: string): bool { n.len() == 4 });
+    println(name.unwrap());                          // crow
 }
 ```
 
@@ -61,9 +63,14 @@ and no undefined behavior. The short version:
   operators and compound assignment included.
 - Structs, enums (bare, single-value, or inline-field variants) with
   exhaustive `match`, growable arrays `[T]`, immutable UTF-8 strings
-  (byte-indexable,
-  `stob`/`btos` to and from `[u8]`), first-class functions and lambdas with
-  by-value capture, and inference-only generics.
+  (byte-indexable, `.to_bytes()`/`.to_string()` to and from `[u8]`),
+  first-class functions and lambdas with by-value capture, and
+  inference-only generics.
+- **Methods** in Rust-style `impl` blocks on structs and enums (generic
+  ones included), associated functions (`Point.new(1, 2)`), and bound
+  methods — `p.norm` without a call is a closure over its receiver. The
+  built-in operations are methods too: `xs.len()`, `xs.push(v)`,
+  `o.unwrap()`, `n.to_string()`.
 - `if` and `match` are expressions, and a function body's final bare
   expression is returned: `fn double(x: int): int { x * 2 }`.
 - **No null**: absence is the predeclared `Option<T>` enum, and every error

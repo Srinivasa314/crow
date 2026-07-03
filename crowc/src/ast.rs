@@ -8,6 +8,29 @@ pub struct Program {
     pub structs: Vec<StructDef>,
     pub enums: Vec<EnumDef>,
     pub funcs: Vec<FuncDef>,
+    /// One record per function in an `impl` block. The parser flattens each
+    /// method into `funcs` under the name `Type.method` (unspellable as an
+    /// identifier, so it cannot collide with user functions); the checker
+    /// resolves `type_name` and builds the method lookup table.
+    pub methods: Vec<MethodDef>,
+}
+
+/// A method or associated function, as declared in `impl Type { ... }`.
+#[derive(Debug)]
+pub struct MethodDef {
+    /// The impl block's target type name (unresolved).
+    pub type_name: String,
+    /// The method's own name (`funcs[func].name` is `Type.method`).
+    pub name: String,
+    /// Index of the flattened definition in `Program::funcs`.
+    pub func: u32,
+    /// True when the first parameter is `self` (a method); false for an
+    /// associated function called as `Type.name(...)`.
+    pub has_self: bool,
+    /// How many type parameters the impl header declared (`impl Pair<T>` →
+    /// 1); must match the target type's arity.
+    pub impl_type_params: u32,
+    pub line: u32,
 }
 
 #[derive(Debug)]
@@ -48,6 +71,10 @@ pub struct FuncDef {
     /// Total number of locals (params + lets) in this function, assigned by
     /// the checker. Lambdas inside the body have their own numbering.
     pub num_locals: u32,
+    /// True for a function flattened out of an `impl` block. Methods are
+    /// never plain values (bound methods build their own closures), so they
+    /// get no thunk or static closure object.
+    pub is_method: bool,
 }
 
 /// Syntactic type, before resolution.
@@ -264,7 +291,6 @@ pub enum Builtin {
     Itos,
     Ftos,
     Itof,
-    Ftoi,
     Stoi,
     Stof,
     Stob,
@@ -372,6 +398,18 @@ pub enum ExprKind {
         arms: Vec<(Pattern, Expr)>,
     },
     Lambda(Box<LambdaDef>),
+    /// `expr.method` without a call: a bound method. Evaluates the receiver
+    /// and builds a fresh closure capturing it, whose code adapts the
+    /// closure calling convention to the method. Parsed as field access and
+    /// rewritten into this by the checker.
+    BoundMethod {
+        obj: Box<Expr>,
+        /// The method's flattened function id.
+        fid: u32,
+        /// Inferred type arguments when the method is generic (all solved
+        /// from the receiver type), like `Call::inst`.
+        inst: Vec<Type>,
+    },
 }
 
 /// A checked variant construction's payload values.

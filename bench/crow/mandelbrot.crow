@@ -5,9 +5,9 @@ fn main() {
     let limit = 100;
 
     for (let py = 0; py < height; py += 1) {
-        let y0 = itof(py) / itof(height) * 2.0 - 1.0;
+        let y0 = py.to_float() / height.to_float() * 2.0 - 1.0;
         for (let px = 0; px < width; px += 1) {
-            let x0 = itof(px) / itof(width) * 3.5 - 2.5;
+            let x0 = px.to_float() / width.to_float() * 3.5 - 2.5;
             let x = 0.0;
             let y = 0.0;
             let iter = 0;

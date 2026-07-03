@@ -820,7 +820,7 @@ pub unsafe extern "C" fn crow_stof(s: *mut u8, line: u64) -> f64 {
     parse_float(txt, line)
 }
 
-/// `stob(s)`: copy a string's bytes into a fresh `[u8]`.
+/// `s.to_bytes()`: copy a string's bytes into a fresh `[u8]`.
 #[no_mangle]
 pub unsafe extern "C" fn crow_stob(s: *mut u8) -> *mut u8 {
     let g = gc();
@@ -838,7 +838,7 @@ pub unsafe extern "C" fn crow_stob(s: *mut u8) -> *mut u8 {
     }
 }
 
-/// `btos(bs)`: build a string from a `[u8]`. The bytes must be valid UTF-8
+/// `bs.to_string()`: build a string from a `[u8]`. The bytes must be valid UTF-8
 /// (panics otherwise), so every observable string stays valid UTF-8.
 #[no_mangle]
 pub unsafe extern "C" fn crow_btos(arr: *mut u8, line: u64) -> *mut u8 {

@@ -144,7 +144,7 @@ fn runtime_panics() {
         ("fn main() { let xs = [1]; println(xs[3]); }", "index 3 out of bounds"),
         ("fn main() { let z = 0; println(1 / z); }", "division by zero"),
         ("fn main() { assert(1 == 2); }", "assertion failed"),
-        ("fn main() { let xs: [int] = []; println(pop(xs)); }", "pop on empty array"),
+        ("fn main() { let xs: [int] = []; println(xs.pop()); }", "pop on empty array"),
     ];
     for (src_text, want) in cases {
         let src = std::env::temp_dir().join(format!(
@@ -196,17 +196,17 @@ fn closures_survive_gc() {
 struct Box { v: int }
 fn churn(n: int) {
     let xs: [Box] = [];
-    for (let i = 0; i < n; i = i + 1) { push(xs, Box { v: i }); }
+    for (let i = 0; i < n; i = i + 1) { xs.push(Box { v: i }); }
 }
 fn main() {
     let fs: [fn(): int] = [];
     for (let i = 0; i < 200; i = i + 1) {
         let b = Box { v: i };
-        push(fs, fn(): int { return b.v; });
+        fs.push(fn(): int { return b.v; });
         churn(50);
     }
     let total = 0;
-    for (let i = 0; i < len(fs); i = i + 1) {
+    for (let i = 0; i < fs.len(); i = i + 1) {
         total = total + fs[i]();
     }
     println(total);

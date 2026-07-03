@@ -42,10 +42,10 @@ fn main() {
     assert(7.0 / 2.0 == 3.5);
     assert(1.0 - 0.5 == 0.5);
     assert(-1.5 < 0.0 && 2.5 >= 2.5 && 1.0 != 2.0 && 2.0 <= 2.0 && 3.0 > 1.0);
-    assert(itof(3) == 3.0);
-    assert(ftoi(2.9) == 2);
-    assert(ftoi(-2.9) == -2);
-    assert(itof(1) / 2.0 == 0.5);
+    assert(3.to_float() == 3.0);
+    assert(2.9 as int == 2);
+    assert(-2.9 as int == -2);
+    assert(1.to_float() / 2.0 == 0.5);
     let inf = 1.0 / 0.0;
     assert(inf > 0.0);
     println("ok");
@@ -58,7 +58,7 @@ fn main() {
 fn bools_and_short_circuit() {
     check_ok(
         r#"
-fn note(log: [int], v: int, r: bool): bool { push(log, v); return r; }
+fn note(log: [int], v: int, r: bool): bool { log.push(v); return r; }
 fn main() {
     assert(true && true);
     assert(!(true && false));
@@ -67,9 +67,9 @@ fn main() {
     assert(true == true && true != false);
     let log: [int] = [];
     if (note(log, 1, false) && note(log, 2, true)) { assert(false); }
-    assert(len(log) == 1);                 // rhs of && not evaluated
+    assert(log.len() == 1);                 // rhs of && not evaluated
     if (note(log, 3, true) || note(log, 4, true)) { } else { assert(false); }
-    assert(len(log) == 2);                 // rhs of || not evaluated
+    assert(log.len() == 2);                 // rhs of || not evaluated
     assert(log[0] == 1 && log[1] == 3);
     println("ok");
 }
@@ -98,7 +98,7 @@ fn main() {
     for (let i = 0; i < 100; i = i + 1) {
         head = Option.Some(Flags {
             a: i % 2 == 0, b: i % 3 == 0, tag: 1, c: true,
-            name: itos(i), d: false, next: head,
+            name: i.to_string(), d: false, next: head,
         });
     }
     gc_collect();
@@ -109,7 +109,7 @@ fn main() {
         match cur {
             Option.Some(n) => {
                 assert(n.a == (k % 2 == 0) && n.b == (k % 3 == 0) && n.c && !n.d);
-                assert(n.name == itos(k));
+                assert(n.name == k.to_string());
                 cur = n.next;
                 k = k - 1;
             }
@@ -120,16 +120,16 @@ fn main() {
 
     // [bool] is a real byte buffer: literals, growth, index, set, pop.
     let xs = [true, false, true];
-    assert(len(xs) == 3 && xs[0] && !xs[1] && xs[2]);
+    assert(xs.len() == 3 && xs[0] && !xs[1] && xs[2]);
     let ys: [bool] = [];
-    for (let i = 0; i < 100; i = i + 1) { push(ys, i % 3 == 0); }   // forces regrowth
-    assert(len(ys) == 100);
+    for (let i = 0; i < 100; i = i + 1) { ys.push(i % 3 == 0); }   // forces regrowth
+    assert(ys.len() == 100);
     gc_collect();
     for (let i = 0; i < 100; i = i + 1) { assert(ys[i] == (i % 3 == 0)); }
     ys[50] = !ys[50];
     assert(ys[50]);                        // 50 % 3 != 0, now flipped on
-    assert(pop(ys) == true && len(ys) == 99);   // 99 % 3 == 0
-    assert(pop(ys) == false);                   // 98 % 3 != 0
+    assert(ys.pop() == true && ys.len() == 99);   // 99 % 3 == 0
+    assert(ys.pop() == false);                   // 98 % 3 != 0
 
     // Register form and closure captures stay full-width words.
     let flag = true;
@@ -148,18 +148,18 @@ fn strings() {
 fn main() {
     let s = "hello" + ", " + "world";
     assert(s == "hello, world");
-    assert(len(s) == 12);
-    assert(len("") == 0);
+    assert(s.len() == 12);
+    assert("".len() == 0);
     assert("" + "" == "");
     assert("a" != "b");
-    assert(len("héllo") == 6);             // byte length
-    assert(len("\n\t\\\"") == 4);          // escapes
-    assert(itos(0) == "0");
-    assert(itos(-42) == "-42");
-    assert(ftos(2.5) == "2.5");
-    assert(ftos(1.0) == "1.0");
+    assert("héllo".len() == 6);             // byte length
+    assert("\n\t\\\"".len() == 4);          // escapes
+    assert(0.to_string() == "0");
+    assert((-42).to_string() == "-42");
+    assert(2.5.to_string() == "2.5");
+    assert(1.0.to_string() == "1.0");
     let built = "";
-    for (let i = 0; i < 3; i = i + 1) { built = built + itos(i); }
+    for (let i = 0; i < 3; i = i + 1) { built = built + i.to_string(); }
     assert(built == "012");
     println("ok");
 }
@@ -174,13 +174,13 @@ fn multiline_strings_and_unicode_escapes() {
 fn main() {
     let two = "line one
 line two";
-    assert(len(two) == 17);                    // embedded newline is kept
+    assert(two.len() == 17);                    // embedded newline is kept
     assert(two == "line one" + "\n" + "line two");
     assert("\u{48}\u{69}" == "Hi");            // ASCII via \u
     assert("\u{e9}" == "é");                   // 2-byte UTF-8
-    assert(len("\u{e9}") == 2);
-    assert(len("\u{2192}") == 3);              // 3-byte UTF-8
-    assert(len("\u{1F600}") == 4);             // 4-byte UTF-8 (emoji)
+    assert("\u{e9}".len() == 2);
+    assert("\u{2192}".len() == 3);              // 3-byte UTF-8
+    assert("\u{1F600}".len() == 4);             // 4-byte UTF-8 (emoji)
     assert("\u{1F600}" == "😀");               // escape and raw char agree
     println("ok");
 }
@@ -224,26 +224,26 @@ fn arrays() {
         r#"
 fn main() {
     let xs = [1, 2, 3];
-    assert(len(xs) == 3 && xs[0] == 1 && xs[2] == 3);
+    assert(xs.len() == 3 && xs[0] == 1 && xs[2] == 3);
     xs[1] = 20;
     assert(xs[1] == 20);
-    for (let i = 0; i < 100; i = i + 1) { push(xs, i); }   // forces regrowth
-    assert(len(xs) == 103);
+    for (let i = 0; i < 100; i = i + 1) { xs.push(i); }   // forces regrowth
+    assert(xs.len() == 103);
     assert(xs[102] == 99);
-    assert(pop(xs) == 99);
-    assert(len(xs) == 102);
+    assert(xs.pop() == 99);
+    assert(xs.len() == 102);
     let empty: [string] = [];
-    assert(len(empty) == 0);
-    push(empty, "x");
+    assert(empty.len() == 0);
+    empty.push("x");
     assert(empty[0] == "x");
-    assert(pop(empty) == "x");
-    assert(len(empty) == 0);
+    assert(empty.pop() == "x");
+    assert(empty.len() == 0);
     let grid = [[1, 2], [3, 4]];
     grid[0][1] = 9;
     assert(grid[0][1] == 9 && grid[1][0] == 3);
     let floats = [1.5, 2.5];
-    push(floats, 3.5);
-    assert(pop(floats) == 3.5);
+    floats.push(3.5);
+    assert(floats.pop() == 3.5);
     assert(floats[0] + floats[1] == 4.0);
     let bools = [true, false];
     assert(bools[0] && !bools[1]);
@@ -277,10 +277,10 @@ fn main() {
     let r = Point { x: 10, y: 99 };
     assert(p != r);                // ...not structural equality
     let head = Node { value: 1, next: Option.Some(Node { value: 2, next: Option.None }) };
-    let second = unwrap(head.next);
+    let second = head.next.unwrap();
     assert(second.value == 2);
     second.next = Option.Some(Node { value: 3, next: Option.None });
-    assert(unwrap(unwrap(head.next).next).value == 3);
+    assert(head.next.unwrap().next.unwrap().value == 3);
     println("ok");
 }
 "#,
@@ -346,7 +346,7 @@ fn ten(a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int, i: int, j
 // references are live, exercising outgoing-args frame accounting.
 fn glue(a: string, b: string, c: string, d: string, e: string,
         f: string, g: string, h: string, i: string, j: string): string {
-    let tag = itos(len(a));
+    let tag = a.len().to_string();
     return a + b + c + d + e + f + g + h + i + j + tag;
 }
 // Ten float arguments overflow the FP register file (8 regs on both x86-64
@@ -363,7 +363,7 @@ fn mixed(s1: string, a: int, x: float, b: int, y: float, c: int, z: float,
          g: int, t: float, h: int, r: float, i: int, s3: string): string {
     let n = a + b + c + d + e + f + g + h + i;
     let fl = x + y + z + w + v + u + t + r;
-    return s1 + s2 + s3 + itos(n) + ftos(fl);
+    return s1 + s2 + s3 + n.to_string() + fl.to_string();
 }
 fn nothing() { return; }
 fn main() {
@@ -439,7 +439,7 @@ fn main() {
     let fs: [fn(int): int] = [];
     for (let i = 0; i < 4; i = i + 1) {
         let k = i;
-        push(fs, fn(x: int): int { return x + k; });
+        fs.push(fn(x: int): int { return x + k; });
     }
     assert(fs[0](0) + fs[1](0) + fs[2](0) + fs[3](0) == 6);
     println("ok");
@@ -531,8 +531,8 @@ fn main() {
     println(999999999999999.0);         // last value with the ".0" suffix
     println(1000000000000000.0);        // 1e15: prints like an integer
     println(0.000000015);
-    println(ftos(0.0 / 0.0));           // ftos agrees with println
-    println(ftos(-0.0));
+    println((0.0 / 0.0).to_string());           // ftos agrees with println
+    println((-0.0).to_string());
 }
 "#,
         "NaN\n-inf\n-0.0\n0.1\n0.30000000000000004\n0.3333333333333333\n\
@@ -551,12 +551,12 @@ fn build(n: int): Mix {
     let head: Option<Mix> = Option.None;
     for (let i = 0; i < n - 1; i = i + 1) {
         head = Option.Some(Mix {
-            a: i, s: itos(i), f: itof(i) + 0.5,
+            a: i, s: i.to_string(), f: i.to_float() + 0.5,
             next: head, ok: i % 2 == 0, xs: [i, i + 1],
         });
     }
     let n1 = n - 1;
-    Mix { a: n1, s: itos(n1), f: itof(n1) + 0.5, next: head, ok: n1 % 2 == 0, xs: [n1, n1 + 1] }
+    Mix { a: n1, s: n1.to_string(), f: n1.to_float() + 0.5, next: head, ok: n1 % 2 == 0, xs: [n1, n1 + 1] }
 }
 fn verify(m: Mix, n: int) {
     let i = n - 1;
@@ -566,8 +566,8 @@ fn verify(m: Mix, n: int) {
         match cur {
             Option.Some(x) => {
                 assert(x.a == i);
-                assert(x.s == itos(i));
-                assert(x.f == itof(i) + 0.5);
+                assert(x.s == i.to_string());
+                assert(x.f == i.to_float() + 0.5);
                 assert(x.ok == (i % 2 == 0));
                 assert(x.xs[0] == i && x.xs[1] == i + 1);
                 cur = x.next;
@@ -588,7 +588,7 @@ fn main() {
     }
     // Old-to-young pointer stores exercise the write barrier.
     for (let i = 0; i < 200; i = i + 1) {
-        let old = unwrap(keep.next);
+        let old = keep.next.unwrap();
         keep.next = Option.Some(Mix {
             a: old.a, s: old.s, f: old.f, next: old.next, ok: old.ok, xs: old.xs,
         });
@@ -596,8 +596,8 @@ fn main() {
     verify(keep, 300);
     // A buffer far larger than the nursery takes the pretenuring path.
     let big: [int] = [];
-    for (let i = 0; i < 50000; i = i + 1) { push(big, i); }
-    assert(len(big) == 50000 && big[49999] == 49999);
+    for (let i = 0; i < 50000; i = i + 1) { big.push(i); }
+    assert(big.len() == 50000 && big[49999] == 49999);
     gc_collect();
     assert(big[12345] == 12345);
     println("ok");
@@ -621,7 +621,7 @@ fn build(n: int): Option<Node> {
 fn sum_alloc(n: Option<Node>): int {
     match n {
         Option.Some(node) => {
-            assert(len(itos(node.value)) > 0);   // allocate at every depth
+            assert(node.value.to_string().len() > 0);   // allocate at every depth
             return node.value + sum_alloc(node.next);
         }
         Option.None => { return 0; }
@@ -643,11 +643,11 @@ fn string_data_survives_relocation() {
 fn main() {
     let words: [string] = [];
     for (let i = 0; i < 2000; i = i + 1) {
-        push(words, itos(i) + "-" + itos(i * 2));
+        words.push(i.to_string() + "-" + (i * 2).to_string());
     }
     gc_collect();
     for (let i = 0; i < 2000; i = i + 1) {
-        assert(words[i] == itos(i) + "-" + itos(i * 2));
+        assert(words[i] == i.to_string() + "-" + (i * 2).to_string());
     }
     println("ok");
 }
@@ -666,7 +666,7 @@ fn main() {
     let head: Option<Node> = Option.None;
     for (let i = 0; i < 500; i = i + 1) {
         head = Option.Some(Node { value: i, next: head });
-        assert(len(itos(i)) > 0);          // extra churn
+        assert(i.to_string().len() > 0);          // extra churn
     }
     let sum = 0;
     let go = true;
@@ -713,24 +713,26 @@ fn panic_assert_reports_line() {
 }
 
 #[test]
-fn panic_ftoi_nan() {
-    // ftoi has the same checked semantics as `expr as int`.
-    expect_panic("fn main() { let nan = 0.0 / 0.0; println(ftoi(nan)); }", "cast out of range");
-}
-
-#[test]
-fn panic_ftoi_too_big() {
-    // 2^64, well past i64::MAX.
+fn panic_float_to_int_nan() {
     expect_panic(
-        "fn main() { let big = 65536.0 * 65536.0 * 65536.0 * 65536.0; println(ftoi(big)); }",
+        "fn main() { let nan = 0.0 / 0.0; println(nan as int); }",
         "cast out of range",
     );
 }
 
 #[test]
-fn panic_ftoi_too_small() {
+fn panic_float_to_int_too_big() {
+    // 2^64, well past i64::MAX.
     expect_panic(
-        "fn main() { let big = 65536.0 * 65536.0 * 65536.0 * 65536.0; println(ftoi(0.0 - big)); }",
+        "fn main() { let big = 65536.0 * 65536.0 * 65536.0 * 65536.0; println(big as int); }",
+        "cast out of range",
+    );
+}
+
+#[test]
+fn panic_float_to_int_too_small() {
+    expect_panic(
+        "fn main() { let big = 65536.0 * 65536.0 * 65536.0 * 65536.0; println((0.0 - big) as int); }",
         "cast out of range",
     );
 }
@@ -769,8 +771,8 @@ fn panic_stack_overflow_while_allocating() {
     expect_panic(
         r#"
 fn churn(n: int): int {
-    let s = itos(n) + "-x";
-    return len(s) + churn(n + 1);
+    let s = n.to_string() + "-x";
+    return s.len() + churn(n + 1);
 }
 fn main() { println(churn(0)); }
 "#,
@@ -840,8 +842,8 @@ fn pretenured_allocation_crossing_major_threshold() {
         r#"
 fn main() {
     let big: [int] = [];
-    for (let i = 0; i < 1100000; i = i + 1) { push(big, i); }
-    assert(len(big) == 1100000);
+    for (let i = 0; i < 1100000; i = i + 1) { big.push(i); }
+    assert(big.len() == 1100000);
     assert(big[0] == 0 && big[549999] == 549999 && big[1099999] == 1099999);
     gc_collect();
     assert(big[777777] == 777777);
@@ -934,7 +936,7 @@ fn build(n: int): Option<Mix> {
     let head: Option<Mix> = Option.None;
     for (let i = 0; i < n; i = i + 1) {
         head = Option.Some(Mix {
-            a: (i % 256) as u8, s: itos(i), b: (0 - i) as i16, f: itof(i) + 0.5,
+            a: (i % 256) as u8, s: i.to_string(), b: (0 - i) as i16, f: i.to_float() + 0.5,
             c: i as u32, next: head, d: (i % 100) as i8, e: 18446744073709551615,
         });
     }
@@ -944,7 +946,7 @@ fn main() {
     let keep = build(300);
     for (let round = 0; round < 5; round = round + 1) {
         let junk = build(50);
-        assert(unwrap(junk).a == 49 as u8);
+        assert(junk.unwrap().a == 49 as u8);
         gc_collect();
     }
     let i = 299;
@@ -954,9 +956,9 @@ fn main() {
         match cur {
             Option.Some(x) => {
                 assert(x.a as int == i % 256);
-                assert(x.s == itos(i));
+                assert(x.s == i.to_string());
                 assert(x.b as int == 0 - i);
-                assert(x.f == itof(i) + 0.5);
+                assert(x.f == i.to_float() + 0.5);
                 assert(x.c as int == i);
                 assert(x.d as int == i % 100);
                 assert(x.e == 18446744073709551615);
@@ -980,17 +982,17 @@ fn packed_arrays() {
 fn main() {
     // Byte arrays regrow across many pushes and keep their values.
     let bytes: [u8] = [];
-    for (let i = 0; i < 1000; i = i + 1) { push(bytes, (i % 256) as u8); }
-    assert(len(bytes) == 1000);
+    for (let i = 0; i < 1000; i = i + 1) { bytes.push((i % 256) as u8); }
+    assert(bytes.len() == 1000);
     for (let i = 0; i < 1000; i = i + 1) { assert(bytes[i] as int == i % 256); }
-    assert(pop(bytes) as int == 999 % 256);
+    assert(bytes.pop() as int == 999 % 256);
     bytes[0] = 255;
     assert(bytes[0] == 255);
     // Signed narrow elements sign-extend on load and pop.
     let small: [i8] = [-128, -1, 127];
     assert(small[0] == -128 && small[1] == -1 && small[2] == 127);
-    push(small, -5);
-    assert(pop(small) == -5);
+    small.push(-5);
+    assert(small.pop() == -5);
     small[1] = -100;
     assert(small[1] == -100);
     let shorts: [i16] = [-32768, 32767];
@@ -1021,17 +1023,17 @@ fn main() {
     let old = Packed { tag: 7, s: "anchor", n: -300, next: Option.None, id: 123456789 };
     gc_collect();                        // promotes `old` out of the nursery
     for (let i = 0; i < 100; i = i + 1) {
-        old.s = itos(i) + "-young";      // old -> young edges via packed offsets
+        old.s = i.to_string() + "-young";      // old -> young edges via packed offsets
         old.next = Option.Some(Packed {
-            tag: (i % 256) as u8, s: itos(i), n: (0 - i) as i16,
+            tag: (i % 256) as u8, s: i.to_string(), n: (0 - i) as i16,
             next: Option.None, id: i as u32,
         });
         gc_collect();                    // forwards the remembered slots
         assert(old.tag == 7 && old.n == -300 && old.id == 123456789);
-        assert(old.s == itos(i) + "-young");
-        let young = unwrap(old.next);
+        assert(old.s == i.to_string() + "-young");
+        let young = old.next.unwrap();
         assert(young.tag as int == i % 256);
-        assert(young.s == itos(i));
+        assert(young.s == i.to_string());
         assert(young.n as int == 0 - i);
         assert(young.id as int == i);
     }
@@ -1049,8 +1051,8 @@ fn gc_pretenured_byte_buffer() {
 // into the old generation; its size accounting is in bytes, not words.
 fn main() {
     let big: [u8] = [];
-    for (let i = 0; i < 300000; i = i + 1) { push(big, (i % 251) as u8); }
-    assert(len(big) == 300000);
+    for (let i = 0; i < 300000; i = i + 1) { big.push((i % 251) as u8); }
+    assert(big.len() == 300000);
     gc_collect();
     for (let i = 0; i < 300000; i = i + 1) { assert(big[i] as int == i % 251); }
     println("ok");
@@ -1070,8 +1072,8 @@ fn main() {
     println(b);
     let c: u8 = 255;
     println(c);
-    println(itos(a));
-    println(itos(b));
+    println(a.to_string());
+    println(b.to_string());
 }
 "#,
         "18446744073709551615\n-128\n255\n18446744073709551615\n-128\n",
@@ -1259,7 +1261,7 @@ fn main() {
     let n = Pair { a: pair_of(1), b: pair_of(2) };
     assert(n.a.a == 1 && n.b.b == 2);
     let s: Pair<[string]> = Pair { a: ["u"], b: [] };
-    push(s.b, "v");
+    s.b.push("v");
     assert(s.a[0] == "u" && s.b[0] == "v");
     let z = pair_of(9);
     assert(z.a == 9);
@@ -1335,16 +1337,16 @@ fn generic_arrays() {
         r#"
 fn rev<T>(xs: [T]): [T] {
     let out: [T] = [];
-    for (let i = len(xs) - 1; i >= 0; i = i - 1) { push(out, xs[i]); }
+    for (let i = xs.len() - 1; i >= 0; i = i - 1) { out.push(xs[i]); }
     return out;
 }
-fn take_last<T>(xs: [T]): T { return pop(xs); }
+fn take_last<T>(xs: [T]): T { return xs.pop(); }
 fn fill<T>(xs: [T], v: T, n: int) {
-    for (let i = 0; i < n; i = i + 1) { push(xs, v); }
+    for (let i = 0; i < n; i = i + 1) { xs.push(v); }
 }
 fn main() {
     let r = rev([1, 2, 3]);
-    assert(len(r) == 3 && r[0] == 3 && r[1] == 2 && r[2] == 1);
+    assert(r.len() == 3 && r[0] == 3 && r[1] == 2 && r[2] == 1);
     let s = rev(["a", "b", "c"]);
     assert(s[0] == "c" && s[2] == "a");
     let bs = rev([true, false]);
@@ -1359,9 +1361,9 @@ fn main() {
     let grown: [string] = [];
     fill(grown, "g", 100);                  // regrowth through generic code
     gc_collect();
-    assert(len(grown) == 100 && grown[99] == "g");
+    assert(grown.len() == 100 && grown[99] == "g");
     let empty: [string] = rev([]);          // element type inferred from context
-    assert(len(empty) == 0);
+    assert(empty.len() == 0);
     println("ok");
 }
 "#,
@@ -1375,15 +1377,15 @@ fn generic_functions_with_function_values() {
 struct Point { x: int, y: int }
 fn map<T, U>(xs: [T], f: fn(T): U): [U] {
     let out: [U] = [];
-    for (let i = 0; i < len(xs); i = i + 1) { push(out, f(xs[i])); }
+    for (let i = 0; i < xs.len(); i = i + 1) { out.push(f(xs[i])); }
     return out;
 }
 fn apply<T>(f: fn(T): T, x: T): T { return f(x); }
 fn double(x: int): int { return x * 2; }
 fn main() {
-    let strs = map([1, 2, 3], fn(x: int): string { return itos(x); });
+    let strs = map([1, 2, 3], fn(x: int): string { return x.to_string(); });
     assert(strs[0] == "1" && strs[2] == "3");
-    let xs = map(["a", "bb", "ccc"], fn(s: string): int { return len(s); });
+    let xs = map(["a", "bb", "ccc"], fn(s: string): int { return s.len(); });
     assert(xs[0] == 1 && xs[2] == 3);
     let pts = map([1, 2], fn(v: int): Point { return Point { x: v, y: v }; });
     assert(pts[1].y == 2);
@@ -1407,8 +1409,8 @@ fn make_getter<T>(x: T): fn(): T {
 fn twice<T>(x: T): [T] {
     let dup = fn(v: T): [T] {
         let out: [T] = [];
-        push(out, v);
-        push(out, v);
+        out.push(v);
+        out.push(v);
         return out;
     };
     return dup(x);
@@ -1420,7 +1422,7 @@ fn main() {
     gc_collect();                     // captured T values are GC roots
     assert(gi() == 7 && gs() == "s" && gf() == 2.5);
     let ts = twice("q");
-    assert(len(ts) == 2 && ts[0] == "q" && ts[1] == "q");
+    assert(ts.len() == 2 && ts[0] == "q" && ts[1] == "q");
     let tn = twice(3);
     assert(tn[0] == 3 && tn[1] == 3);
     println("ok");
@@ -1461,17 +1463,17 @@ fn empty<T>(): [T] { return []; }
 fn none<T>(): Option<T> { return Option.None; }
 fn main() {
     let xs: [string] = empty();       // solved from the annotation
-    push(xs, "a");
-    assert(len(xs) == 1);
+    xs.push("a");
+    assert(xs.len() == 1);
     let ys: [int] = empty();
-    push(ys, 5);
+    ys.push(5);
     assert(ys[0] == 5);
     let p: Option<int> = none();        // T solved from the annotation
     match p { Option.Some(v) => { assert(v != v); } Option.None => { } }
     // The expected type also flows through assignment targets.
     let zs: [[int]] = [];
-    push(zs, empty());
-    assert(len(zs[0]) == 0);
+    zs.push(empty());
+    assert(zs[0].len() == 0);
     println("ok");
 }
 "#,
@@ -1640,11 +1642,11 @@ fn main() {
     assert(s[0] == b'H');
     assert(s[4] == b'o');
     assert(s[1] - b'a' == 4);
-    assert(len(s) == 5);
+    assert(s.len() == 5);
 
     // Bytes of a multi-byte character (é = 0xC3 0xA9 in UTF-8).
     let e = "é";
-    assert(len(e) == 2);
+    assert(e.len() == 2);
     assert(e[0] == b'\xc3' && e[1] == b'\xa9');
 
     // Byte escapes.
@@ -1655,7 +1657,7 @@ fn main() {
     let src = "-437";
     let neg = src[0] == b'-';
     let v = 0;
-    for (let i = 1; i < len(src); i = i + 1) {
+    for (let i = 1; i < src.len(); i = i + 1) {
         assert(src[i] >= b'0' && src[i] <= b'9');
         v = v * 10 + (src[i] - b'0') as int;
     }
@@ -1725,18 +1727,18 @@ fn main() {
 fn compound_assignment_evaluates_target_once() {
     check_ok(
         r#"
-fn hit(log: [int], i: int): int { push(log, i); return i; }
+fn hit(log: [int], i: int): int { log.push(i); return i; }
 fn main() {
     // The index and object expressions run once per compound assignment.
     let log: [int] = [];
     let xs = [5, 7];
     xs[hit(log, 0)] += 1;
-    assert(len(log) == 1);
+    assert(log.len() == 1);
     assert(xs[0] == 6);
 
     let grid = [[10], [20]];
     grid[hit(log, 1)][hit(log, 0)] *= 3;
-    assert(len(log) == 3);
+    assert(log.len() == 3);
     assert(grid[1][0] == 60);
     println("ok");
 }
@@ -1761,7 +1763,7 @@ fn main() {
         ss[0] += "!";
         let junk = pad(i % 37);        // churn the nursery
     }
-    assert(len(ss[0]) == 201 && ss[0][0] == b'a' && ss[0][200] == b'!');
+    assert(ss[0].len() == 201 && ss[0][0] == b'a' && ss[0][200] == b'!');
     assert(ss[1] == "b");
     println("ok");
 }
@@ -1775,7 +1777,7 @@ fn panic_compound_assignment_rechecks_bounds() {
     // even though the read passed.
     expect_panic(
         r#"
-fn shrink(xs: [int]): int { let v = pop(xs); return v; }
+fn shrink(xs: [int]): int { let v = xs.pop(); return v; }
 fn main() {
     let xs = [1, 2, 3];
     xs[2] += shrink(xs);
@@ -1803,7 +1805,7 @@ fn if_expressions() {
     check_ok(
         r#"
 struct P { v: int }
-fn note(log: [int], v: int): int { push(log, v); return v; }
+fn note(log: [int], v: int): int { log.push(v); return v; }
 fn main() {
     assert(if true { 1 } else { 2 } == 1);
     assert(if false { 1 } else { 2 } == 2);
@@ -1813,7 +1815,7 @@ fn main() {
     // Only the taken branch evaluates.
     let log: [int] = [];
     let x = if true { note(log, 1) } else { note(log, 2) };
-    assert(x == 1 && len(log) == 1 && log[0] == 1);
+    assert(x == 1 && log.len() == 1 && log[0] == 1);
 
     // Reference-typed branches.
     let p = P { v: 7 };
@@ -1836,18 +1838,18 @@ fn stoi_stof() {
     check_ok(
         r#"
 fn main() {
-    assert(stoi("0") == 0);
-    assert(stoi("42") == 42);
-    assert(stoi("-7") == -7);
-    assert(stoi("9223372036854775807") == 9223372036854775807);
-    assert(stoi("-9223372036854775808") == -9223372036854775808);
-    assert(stoi(itos(123456)) == 123456);
+    assert("0".to_int() == 0);
+    assert("42".to_int() == 42);
+    assert("-7".to_int() == -7);
+    assert("9223372036854775807".to_int() == 9223372036854775807);
+    assert("-9223372036854775808".to_int() == -9223372036854775808);
+    assert(123456.to_string().to_int() == 123456);
 
-    assert(stof("1.5") == 1.5);
-    assert(stof("-0.25") == -0.25);
-    assert(stof("3") == 3.0);
-    assert(stof("1e3") == 1000.0);
-    assert(stof(ftos(2.5)) == 2.5);
+    assert("1.5".to_float() == 1.5);
+    assert("-0.25".to_float() == -0.25);
+    assert("3".to_float() == 3.0);
+    assert("1e3".to_float() == 1000.0);
+    assert(2.5.to_string().to_float() == 2.5);
     println("ok");
 }
 "#,
@@ -1859,7 +1861,7 @@ fn panic_stoi_invalid() {
     expect_panic(
         r#"
 fn main() {
-    println(stoi("12x"));
+    println("12x".to_int());
 }
 "#,
         "stoi: invalid integer \"12x\" at line 3",
@@ -1868,10 +1870,10 @@ fn main() {
 
 #[test]
 fn panic_stoi_rejects_padding_and_plus() {
-    expect_panic(r#"fn main() { println(stoi(" 1")); }"#, "invalid integer");
-    expect_panic(r#"fn main() { println(stoi("+1")); }"#, "invalid integer");
-    expect_panic(r#"fn main() { println(stoi("")); }"#, "invalid integer");
-    expect_panic(r#"fn main() { println(stoi("1 ")); }"#, "invalid integer");
+    expect_panic(r#"fn main() { println(" 1".to_int()); }"#, "invalid integer");
+    expect_panic(r#"fn main() { println("+1".to_int()); }"#, "invalid integer");
+    expect_panic(r#"fn main() { println("".to_int()); }"#, "invalid integer");
+    expect_panic(r#"fn main() { println("1 ".to_int()); }"#, "invalid integer");
 }
 
 #[test]
@@ -1879,7 +1881,7 @@ fn panic_stoi_out_of_range() {
     expect_panic(
         r#"
 fn main() {
-    println(stoi("9223372036854775808"));
+    println("9223372036854775808".to_int());
 }
 "#,
         "out of range at line 3",
@@ -1888,10 +1890,10 @@ fn main() {
 
 #[test]
 fn panic_stof_invalid() {
-    expect_panic(r#"fn main() { println(stof("abc")); }"#, "stof: invalid float");
-    expect_panic(r#"fn main() { println(stof("inf")); }"#, "stof: invalid float");
-    expect_panic(r#"fn main() { println(stof("+1.0")); }"#, "stof: invalid float");
-    expect_panic(r#"fn main() { println(stof("1e999")); }"#, "out of range");
+    expect_panic(r#"fn main() { println("abc".to_float()); }"#, "stof: invalid float");
+    expect_panic(r#"fn main() { println("inf".to_float()); }"#, "stof: invalid float");
+    expect_panic(r#"fn main() { println("+1.0".to_float()); }"#, "stof: invalid float");
+    expect_panic(r#"fn main() { println("1e999".to_float()); }"#, "out of range");
 }
 
 #[test]
@@ -1899,27 +1901,28 @@ fn stob_btos() {
     check_ok(
         r#"
 fn upper(s: string): string {
-    let bs = stob(s);
-    for (let i = 0; i < len(bs); i = i + 1) {
+    let bs = s.to_bytes();
+    for (let i = 0; i < bs.len(); i = i + 1) {
         if bs[i] >= b'a' && bs[i] <= b'z' { bs[i] -= 32; }
     }
-    return btos(bs);
+    return bs.to_string();
 }
 fn main() {
-    let bs = stob("abc");
-    assert(len(bs) == 3 && bs[0] == b'a' && bs[2] == b'c');
+    let bs = "abc".to_bytes();
+    assert(bs.len() == 3 && bs[0] == b'a' && bs[2] == b'c');
 
     // The array is a copy: mutating it leaves the string alone.
     let s = "hello";
-    let cs = stob(s);
+    let cs = s.to_bytes();
     cs[0] = b'H';
-    assert(s == "hello" && btos(cs) == "Hello");
+    assert(s == "hello" && cs.to_string() == "Hello");
 
     // Arrays built by hand round-trip, and push/pop work on the copy.
-    push(cs, b'!');
-    assert(btos(cs) == "Hello!");
-    assert(btos([104, 105]) == "hi");
-    assert(btos(stob("")) == "" && len(stob("")) == 0);
+    cs.push(b'!');
+    assert(cs.to_string() == "Hello!");
+    let hi: [u8] = [104, 105];
+    assert(hi.to_string() == "hi");
+    assert("".to_bytes().to_string() == "" && "".to_bytes().len() == 0);
 
     // Multi-byte characters survive the round trip (é = 2 bytes).
     assert(upper("héllo, crow") == "HéLLO, CROW");
@@ -1928,10 +1931,10 @@ fn main() {
     let acc: [string] = [];
     for (let i = 0; i < 100; i = i + 1) {
         let b: [u8] = [];
-        push(b, b'a' + (i % 26) as u8);
-        push(acc, btos(b));
+        b.push(b'a' + (i % 26) as u8);
+        acc.push(b.to_string());
     }
-    assert(len(acc) == 100 && acc[0] == "a" && acc[25] == "z" && acc[26] == "a");
+    assert(acc.len() == 100 && acc[0] == "a" && acc[25] == "z" && acc[26] == "a");
     println("ok");
 }
 "#,
@@ -1944,7 +1947,7 @@ fn panic_btos_invalid_utf8() {
         r#"
 fn main() {
     let bs: [u8] = [104, 255, 105];
-    println(btos(bs));
+    println(bs.to_string());
 }
 "#,
         "btos: invalid UTF-8 at line 4",
@@ -1971,7 +1974,7 @@ fn main() {
     assert(inc(41) == 42);
     let squares = fn(n: int): [int] {
         let out: [int] = [];
-        for (let i = 1; i <= n; i = i + 1) { push(out, i * i); }
+        for (let i = 1; i <= n; i = i + 1) { out.push(i * i); }
         out
     };
     let sq = squares(4);
@@ -2059,7 +2062,7 @@ fn sum(t: Tree): int {
 fn main() {
     let total = 0;
     for (let i = 0; i < 10; i += 1) { total += sum(build(14, 1)); }
-    for (let i = 0; i < 8000000; i += 1) { let s = itos(i); }
+    for (let i = 0; i < 8000000; i += 1) { let s = i.to_string(); }
     println(total);
 }
 "#;
@@ -2101,7 +2104,7 @@ fn area(s: Shape): float {
 }
 fn describe(s: Shape): string {
     return match s {
-        Shape.Circle(r) => "circle " + ftos(r),
+        Shape.Circle(r) => "circle " + r.to_string(),
         _ => "other",
     };
 }
@@ -2175,7 +2178,7 @@ fn enum_generic_option() {
     check_ok(
         r#"
 fn find(xs: [int], want: int): Option<int> {
-    for (let i = 0; i < len(xs); i += 1) {
+    for (let i = 0; i < xs.len(); i += 1) {
         if xs[i] == want { return Option.Some(i); }
     }
     Option.None
@@ -2188,9 +2191,9 @@ fn main() {
     // Inference: from the payload, from the expected type, from returns.
     let a = Option.Some(42);
     let b: Option<string> = Option.None;
-    assert(unwrap(a) == 42);
+    assert(a.unwrap() == 42);
     assert(or_else(b, "d") == "d");
-    assert(unwrap(find([5, 6, 7], 6)) == 1);
+    assert(find([5, 6, 7], 6).unwrap() == 1);
     match find([5], 9) {
         Option.Some(i) => { assert(i != i); }
         Option.None => { }
@@ -2198,10 +2201,10 @@ fn main() {
 
     // Payload shapes: float, narrow ints, strings, structs — and the
     // generic body is shared per shape.
-    assert(unwrap(wrap(2.5)) == 2.5);
+    assert(wrap(2.5).unwrap() == 2.5);
     let u: u8 = 200;
-    assert(unwrap(wrap(u)) == 200);
-    assert(unwrap(wrap("hi")) == "hi");
+    assert(wrap(u).unwrap() == 200);
+    assert(wrap("hi").unwrap() == "hi");
 
     // Nesting: Some(None) and Some(Some(v)) stay distinct.
     let inner: Option<int> = Option.None;
@@ -2215,7 +2218,7 @@ fn main() {
         }
         Option.None => { assert(false); }
     }
-    assert(unwrap(unwrap(Option.Some(Option.Some(7)))) == 7);
+    assert(((Option.Some(Option.Some(7))).unwrap()).unwrap() == 7);
     println("ok");
 }
 "#,
@@ -2257,16 +2260,16 @@ fn main() {
     // Options holding fresh strings under allocation pressure.
     let kept: [Option<string>] = [];
     for (let i = 0; i < 2000; i += 1) {
-        push(kept, Option.Some("v" + itos(i)));
-        if i % 3 == 0 { push(kept, Option.None); }
+        kept.push(Option.Some("v" + i.to_string()));
+        if i % 3 == 0 { kept.push(Option.None); }
     }
     gc_collect();
-    assert(unwrap(kept[0]) == "v0");
+    assert(kept[0].unwrap() == "v0");
     match kept[1] {                        // the None pushed at i == 0
         Option.Some(v) => { assert(v != v); }
         Option.None => { }
     }
-    assert(unwrap(kept[2]) == "v1");
+    assert(kept[2].unwrap() == "v1");
     println("ok");
 }
 "#,
@@ -2333,7 +2336,7 @@ fn main() {
     // Enums in arrays, driven through a fold.
     let ops = [Op.Add(5), Op.Mul(3), Op.Add(1), Op.Reset, Op.Add(2)];
     let acc = 0;
-    for (let i = 0; i < len(ops); i += 1) { acc = apply(acc, ops[i]); }
+    for (let i = 0; i < ops.len(); i += 1) { acc = apply(acc, ops[i]); }
     assert(acc == 2);
 
     // Match arms returning early from the enclosing function count as
@@ -2397,7 +2400,7 @@ fn unwrap_none_panics() {
         r#"
 fn main() {
     let o: Option<int> = Option.None;
-    println(unwrap(o));
+    println(o.unwrap());
 }
 "#,
         "unwrap of None at line 4",
@@ -2515,11 +2518,11 @@ fn enum_compile_errors() {
     // Field access and unwrap misuse.
     expect_compile_error(
         "enum E { A(int) } fn main() { let e = E.A(1); println(e.value); }",
-        "field access on non-struct type E",
+        "enum 'E' has no method 'value'",
     );
     expect_compile_error(
-        "fn main() { let x = unwrap(1); }",
-        "unwrap() needs an Option, found int",
+        "fn main() { let x = 1.unwrap(); }",
+        "type int has no method 'unwrap'",
     );
     // Match expressions need one common arm type and a value.
     expect_compile_error(
@@ -2537,12 +2540,12 @@ fn enum_shadowing_rules() {
     // A local shadows an enum name; the enum is unreachable in that scope.
     expect_compile_error(
         "enum E { A } fn main() { let E = 1; let e = E.A; }",
-        "field access on non-struct type int",
+        "type int has no method 'A'",
     );
     // A user Option shadows the prelude, which disables unwrap...
     expect_compile_error(
-        "enum Option { Something } fn main() { let x = unwrap(Option.Something); }",
-        "unwrap() needs an Option",
+        "enum Option { Something } fn main() { let x = Option.Something.unwrap(); }",
+        "enum 'Option' has no method 'unwrap'",
     );
     // ...but the user type itself works normally.
     check_ok(
@@ -2555,11 +2558,19 @@ fn main() {
 }
 "#,
     );
-    // A user function named unwrap shadows the builtin.
+    // A user method named unwrap on a user Option shadows the builtin
+    // method; a free function named unwrap is just a function.
     check_ok(
         r#"
+enum Option { Something(int), Nothing }
+impl Option {
+    fn unwrap(self): int {
+        (match self { Option.Something(v) => v + 100, Option.Nothing => -1 })
+    }
+}
 fn unwrap(x: int): int { x + 1 }
 fn main() {
+    assert(Option.Something(1).unwrap() == 101);
     assert(unwrap(1) == 2);
     println("ok");
 }
@@ -2632,10 +2643,10 @@ fn main() {
     // A bound reference field aliases the shared object.
     let shared = [9];
     match (Mixed.Pack { tag: 1, name: "a", item: shared, weight: 0.0 }) {
-        Mixed.Pack { item, tag: _, name: _, weight: _ } => { push(item, 10); }
+        Mixed.Pack { item, tag: _, name: _, weight: _ } => { item.push(10); }
         Mixed.Nothing => { }
     }
-    assert(len(shared) == 2 && shared[1] == 10);
+    assert(shared.len() == 2 && shared[1] == 10);
     println("ok");
 }
 "#,
@@ -2697,5 +2708,364 @@ fn enum_inline_field_errors() {
     expect_compile_error(
         "enum E { R { w: int }, B } fn main() { assert(E.B == E.B); }",
         "'==' is not available on enum 'E'",
+    );
+}
+
+// -- Methods ------------------------------------------------------------------
+
+#[test]
+fn methods_on_structs() {
+    check_ok(
+        r#"
+struct Point { x: int, y: int }
+
+impl Point {
+    fn new(x: int, y: int): Point { Point { x: x, y: y } }
+    fn norm2(self): int { self.x * self.x + self.y * self.y }
+    fn translate(self, dx: int, dy: int) {
+        self.x += dx;
+        self.y += dy;
+    }
+}
+
+// A type can have several impl blocks.
+impl Point {
+    fn is_origin(self): bool { self.x == 0 && self.y == 0 }
+}
+
+fn main() {
+    let p = Point.new(3, 4);
+    assert(p.norm2() == 25);
+    p.translate(1, -1);
+    assert(p.x == 4 && p.y == 3 && p.norm2() == 25);
+    assert(!p.is_origin() && Point.new(0, 0).is_origin());
+
+    // methods work on any receiver expression: literals, calls, elements
+    assert(Point { x: 1, y: 2 }.norm2() == 5);
+    let ps = [Point.new(1, 0), Point.new(0, 2)];
+    assert(ps[1].norm2() == 4);
+
+    // the receiver aliases like any reference: mutation is visible
+    let q = p;
+    q.translate(10, 10);
+    assert(p.x == 14);
+    println("ok");
+}
+"#,
+    );
+}
+
+#[test]
+fn methods_on_enums() {
+    check_ok(
+        r#"
+enum Shape {
+    Circle(float),
+    Rect { w: float, h: float },
+    Empty,
+}
+
+impl Shape {
+    fn unit(): Shape { Shape.Rect { w: 1.0, h: 1.0 } }
+    fn area(self): float {
+        (match self {
+            Shape.Circle(r) => 3.0 * r * r,
+            Shape.Rect { w, h } => w * h,
+            Shape.Empty => 0.0,
+        })
+    }
+    fn scaled(self, k: float): Shape {
+        (match self {
+            Shape.Circle(r) => Shape.Circle(r * k),
+            Shape.Rect { w, h } => Shape.Rect { w: w * k, h: h * k },
+            Shape.Empty => Shape.Empty,
+        })
+    }
+}
+
+fn main() {
+    assert(Shape.Circle(2.0).area() == 12.0);
+    assert(Shape.unit().area() == 1.0);
+    assert(Shape.unit().scaled(3.0).area() == 9.0);
+    assert(Shape.Empty.area() == 0.0);
+    println("ok");
+}
+"#,
+    );
+}
+
+#[test]
+fn methods_on_generic_types() {
+    check_ok(
+        r#"
+struct Pair<T> { a: T, b: T }
+
+impl Pair<T> {
+    fn first(self): T { self.a }
+    fn swap(self): Pair<T> { Pair { a: self.b, b: self.a } }
+    // A method may add its own type parameters after the impl's.
+    fn map<U>(self, f: fn(T): U): Pair<U> {
+        Pair { a: f(self.a), b: f(self.b) }
+    }
+}
+
+enum Tree<T> {
+    Leaf(T),
+    Fork { l: Tree<T>, r: Tree<T> },
+}
+
+impl Tree<T> {
+    fn depth(self): int {
+        match self {
+            Tree.Leaf(_v) => { return 1; }
+            Tree.Fork { l, r } => {
+                let a = l.depth();
+                let b = r.depth();
+                return 1 + (if a > b { a } else { b });
+            }
+        }
+    }
+}
+
+fn main() {
+    // One impl serves every instantiation (and every shape).
+    let ints = Pair { a: 1, b: 2 };
+    let strs = Pair { a: "x", b: "y" };
+    let floats = Pair { a: 1.5, b: 2.5 };
+    assert(ints.swap().first() == 2);
+    assert(strs.swap().first() == "y");
+    assert(floats.first() == 1.5);
+    let lens = strs.map(fn(s: string): int { s.len() });
+    assert(lens.a == 1 && lens.b == 1);
+
+    // Recursive methods on a generic enum.
+    let t = Tree.Fork { l: Tree.Leaf(1), r: Tree.Fork { l: Tree.Leaf(2), r: Tree.Leaf(3) } };
+    assert(t.depth() == 3);
+    println("ok");
+}
+"#,
+    );
+}
+
+#[test]
+fn bound_methods() {
+    check_ok(
+        r#"
+struct Counter { n: int }
+
+impl Counter {
+    fn bump(self): int {
+        self.n += 1;
+        self.n
+    }
+}
+
+struct Pair<T> { a: T, b: T }
+impl Pair<T> {
+    fn first(self): T { self.a }
+}
+
+fn main() {
+    // `expr.method` without a call is a closure capturing the receiver.
+    let c = Counter { n: 0 };
+    let bump = c.bump;
+    assert(bump() == 1 && bump() == 2);
+    assert(c.n == 2);           // the closure aliases the same object
+
+    // Bound methods are ordinary fn values: pass, store, call later.
+    let fs: [fn(): int] = [];
+    for (let i = 0; i < 50; i += 1) {
+        fs.push(Counter { n: i * 10 }.bump);
+    }
+    let total = 0;
+    for (let i = 0; i < fs.len(); i += 1) { total += fs[i](); }
+    assert(total == 50 * (0 + 490) / 2 + 50);
+
+    // Binding infers the impl's type arguments from the receiver.
+    let p = Pair { a: "hi", b: "there" };
+    let f = p.first;
+    assert(f() == "hi");
+
+    // Each evaluation builds a fresh closure: identity, not equality.
+    assert(c.bump != c.bump);
+    println("ok");
+}
+"#,
+    );
+}
+
+#[test]
+fn methods_under_gc_pressure() {
+    // Methods returning fresh allocations while the nursery churns; the
+    // 64 KiB dual run forces relocation through receivers and closures.
+    check_ok(
+        r#"
+struct Node { value: int, next: Option<Node> }
+
+impl Node {
+    fn cons(self, v: int): Node { Node { value: v, next: Option.Some(self) } }
+    fn sum(self): int {
+        let total = self.value;
+        let cur = self.next;
+        let go = true;
+        while go {
+            match cur {
+                Option.Some(n) => { total += n.value; cur = n.next; }
+                Option.None => { go = false; }
+            }
+        }
+        total
+    }
+}
+
+fn main() {
+    let list = Node { value: 0, next: Option.None };
+    for (let i = 1; i <= 200; i += 1) {
+        list = list.cons(i);
+    }
+    assert(list.sum() == 200 * 201 / 2);
+    let sum = list.sum;
+    gc_collect();
+    assert(sum() == 20100);
+    println("ok");
+}
+"#,
+    );
+}
+
+#[test]
+fn builtin_methods_on_small_types() {
+    check_ok(
+        r#"
+fn main() {
+    // to_string on every integer width, signed and unsigned.
+    let b: u8 = 200;
+    assert(b.to_string() == "200");
+    assert(b'a'.to_string() == "97");
+    let neg: i8 = -5;
+    assert(neg.to_string() == "-5");
+    let big: u64 = 18446744073709551615;
+    assert(big.to_string() == "18446744073709551615");
+    assert(7.to_float() == 7.0 && b.to_float() == 200.0);
+    assert(2.5.to_string() == "2.5");
+    // chaining reads naturally
+    assert("42".to_int().to_string() == "42");
+    assert("abc".to_bytes().to_string() == "abc");
+    println("ok");
+}
+"#,
+    );
+}
+
+#[test]
+fn method_compile_errors() {
+    expect_compile_error(
+        "struct P { x: int } fn main() { let p = P { x: 1 }; p.norm(); }",
+        "struct 'P' has no field or method 'norm'",
+    );
+    expect_compile_error(
+        "struct P { x: int } impl P { fn f(self): int { self.x } } \
+         fn main() { P.f(); }",
+        "'f' is a method; call it as 'value.f(...)'",
+    );
+    expect_compile_error(
+        "struct P { x: int } impl P { fn mk(): P { P { x: 1 } } } \
+         fn main() { let p = P { x: 1 }; p.mk(); }",
+        "'mk' is an associated function; call it as 'P.mk(...)'",
+    );
+    expect_compile_error(
+        "struct P { x: int } impl P { fn mk(): P { P { x: 1 } } } \
+         fn main() { let f = P.mk; }",
+        "'P.mk' can only be called, not used as a value",
+    );
+    // Arity messages never count the receiver.
+    expect_compile_error(
+        "struct P { x: int } impl P { fn f(self, y: int): int { self.x + y } } \
+         fn main() { P { x: 1 }.f(); }",
+        "'f' expects 1 argument(s), got 0",
+    );
+    // self is only a receiver.
+    expect_compile_error("fn main() { let x = self; }", "'self' is only available inside");
+    expect_compile_error(
+        "struct P { x: int } impl P { fn f(self: P): int { 1 } } fn main() { }",
+        "'self' takes no type annotation",
+    );
+    expect_compile_error(
+        "struct P { x: int } impl P { fn f(y: int, self): int { 1 } } fn main() { }",
+        "'self' must be the first parameter",
+    );
+    // Name collisions.
+    expect_compile_error(
+        "struct P { x: int } impl P { fn x(self): int { 1 } } fn main() { }",
+        "method 'x' has the same name as a field",
+    );
+    expect_compile_error(
+        "enum E { A } impl E { fn A(self): int { 1 } } fn main() { }",
+        "method 'A' has the same name as a variant",
+    );
+    expect_compile_error(
+        "struct P { x: int } impl P { fn f(self): int { 1 } } \
+         impl P { fn f(self): int { 2 } } fn main() { }",
+        "duplicate method 'f' on 'P'",
+    );
+    // impl target validation.
+    expect_compile_error("impl Nope { fn f(self): int { 1 } } fn main() { }",
+        "impl blocks are only for structs and enums");
+    expect_compile_error("impl int { fn f(self): int { 1 } } fn main() { }",
+        "impl blocks are only for structs and enums");
+    expect_compile_error(
+        "struct Pair<T> { a: T, b: T } impl Pair { fn f(self): int { 1 } } fn main() { }",
+        "impl block for 'Pair' must declare 1 type parameter(s), got 0",
+    );
+    expect_compile_error(
+        "struct P { x: int } impl P<T> { fn f(self): int { 1 } } fn main() { }",
+        "impl block for 'P' must declare 0 type parameter(s), got 1",
+    );
+    // A method with its own type parameters cannot be bound as a value.
+    expect_compile_error(
+        "struct P { x: int } impl P { fn id<U>(self, u: U): U { u } } \
+         fn main() { let f = P { x: 1 }.id; }",
+        "cannot infer type parameter 'U' of method 'id'",
+    );
+    // Methods do not exist on type parameters.
+    expect_compile_error(
+        "struct P { x: int } impl P { fn f(self): int { 1 } } \
+         fn f2<T>(v: T): int { v.f() } fn main() { f2(P { x: 1 }); }",
+        "type T has no method 'f'",
+    );
+}
+
+#[test]
+fn methods_inside_generic_callers() {
+    // Method calls and bound methods where the receiver's type arguments
+    // are the *caller's* type parameters: mono must substitute them into
+    // the call's (and bind thunk's) instantiation.
+    check_ok(
+        r#"
+struct Pair<T> { a: T, b: T }
+
+impl Pair<T> {
+    fn first(self): T { self.a }
+    fn swap(self): Pair<T> { Pair { a: self.b, b: self.a } }
+}
+
+fn pick<T>(p: Pair<T>): T {
+    let f = p.first;        // bound method, T from the caller
+    f()
+}
+
+fn last<T>(p: Pair<T>): T { p.swap().first() }
+
+fn main() {
+    assert(pick(Pair { a: 1, b: 2 }) == 1);
+    assert(pick(Pair { a: "x", b: "y" }) == "x");
+    assert(pick(Pair { a: 1.5, b: 2.5 }) == 1.5);
+    let tiny: Pair<u8> = Pair { a: 7, b: 9 };
+    assert(pick(tiny) == 7);
+    assert(last(Pair { a: 1, b: 2 }) == 2);
+    assert(last(Pair { a: "x", b: "y" }) == "y");
+    println("ok");
+}
+"#,
     );
 }

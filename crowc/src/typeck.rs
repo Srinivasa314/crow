@@ -36,6 +36,7 @@ pub fn check(program: &mut Program) -> Result<Checked, String> {
         option_enum: None,
         funcs: Vec::new(),
         func_ids: HashMap::new(),
+        methods: HashMap::new(),
         ctxs: Vec::new(),
         loop_depth: 0,
         func_locals: Vec::new(),
@@ -49,6 +50,7 @@ pub fn check(program: &mut Program) -> Result<Checked, String> {
     ck.collect_enum_names(program)?;
     ck.resolve_struct_fields(program)?;
     ck.resolve_enum_variants(program)?;
+    ck.collect_methods(program)?;
     ck.collect_funcs(program)?;
     for (i, f) in program.funcs.iter_mut().enumerate() {
         ck.check_func(i as u32, f)?;
@@ -81,24 +83,42 @@ pub fn check(program: &mut Program) -> Result<Checked, String> {
     })
 }
 
+/// Free-function builtins: only the ones with no natural receiver.
+/// Everything else is a *method* on its receiver type (§ builtin methods).
 const BUILTINS: &[(&str, Builtin)] = &[
     ("println", Builtin::Println),
     ("print", Builtin::Print),
-    ("len", Builtin::Len),
-    ("push", Builtin::Push),
-    ("pop", Builtin::Pop),
-    ("itos", Builtin::Itos),
-    ("ftos", Builtin::Ftos),
-    ("itof", Builtin::Itof),
-    ("ftoi", Builtin::Ftoi),
-    ("stoi", Builtin::Stoi),
-    ("stof", Builtin::Stof),
-    ("stob", Builtin::Stob),
-    ("btos", Builtin::Btos),
     ("assert", Builtin::Assert),
     ("gc_collect", Builtin::GcCollect),
-    ("unwrap", Builtin::Unwrap),
 ];
+
+/// Former free-function builtins that became methods, with the new
+/// spelling; used purely for a helpful "unknown function" diagnostic.
+const RETIRED_BUILTINS: &[(&str, &str)] = &[
+    ("len", "x.len()"),
+    ("push", "arr.push(value)"),
+    ("pop", "arr.pop()"),
+    ("itos", "i.to_string()"),
+    ("ftos", "f.to_string()"),
+    ("itof", "i.to_float()"),
+    ("ftoi", "f as int"),
+    ("stoi", "s.to_int()"),
+    ("stof", "s.to_float()"),
+    ("stob", "s.to_bytes()"),
+    ("btos", "bytes.to_string()"),
+    ("unwrap", "opt.unwrap()"),
+];
+
+fn retired_hint(name: &str) -> Option<&'static str> {
+    RETIRED_BUILTINS.iter().find(|(n, _)| *n == name).map(|(_, h)| *h)
+}
+
+/// Method-table key: a struct or enum definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TypeKey {
+    Struct(u32),
+    Enum(u32),
+}
 
 /// Per-function (or per-lambda) checking context.
 struct FnCtx {
@@ -119,6 +139,9 @@ struct Checker {
     option_enum: Option<u32>,
     funcs: Vec<FuncSig>,
     func_ids: HashMap<String, u32>,
+    /// Methods and associated functions from impl blocks, keyed by target
+    /// type and name; the value is (flattened function id, has self).
+    methods: HashMap<(TypeKey, String), (u32, bool)>,
     ctxs: Vec<FnCtx>,
     loop_depth: u32,
     func_locals: Vec<Vec<Type>>,
@@ -357,9 +380,83 @@ impl Checker {
         Ok(())
     }
 
+    /// Validate impl blocks and build the method lookup table. Runs before
+    /// `collect_funcs` (which resolves the flattened signatures, including
+    /// the synthesized `self` parameter) purely for error-message order;
+    /// bodies are checked later, when both tables exist.
+    fn collect_methods(&mut self, program: &Program) -> CResult<()> {
+        for m in &program.methods {
+            let key = if let Some(&sid) = self.struct_ids.get(&m.type_name) {
+                let info = &self.structs[sid as usize];
+                if info.fields.iter().any(|(n, _)| n == &m.name) {
+                    return Err(format!(
+                        "{}: method '{}' has the same name as a field of struct '{}'",
+                        m.line, m.name, m.type_name
+                    ));
+                }
+                if info.type_params.len() != m.impl_type_params as usize {
+                    return Err(format!(
+                        "{}: impl block for '{}' must declare {} type parameter(s), got {}",
+                        m.line,
+                        m.type_name,
+                        info.type_params.len(),
+                        m.impl_type_params
+                    ));
+                }
+                TypeKey::Struct(sid)
+            } else if let Some(&eid) = self.enum_ids.get(&m.type_name) {
+                let info = &self.enums[eid as usize];
+                if info.variants.iter().any(|(n, _)| n == &m.name) {
+                    return Err(format!(
+                        "{}: method '{}' has the same name as a variant of enum '{}'",
+                        m.line, m.name, m.type_name
+                    ));
+                }
+                if info.type_params.len() != m.impl_type_params as usize {
+                    return Err(format!(
+                        "{}: impl block for '{}' must declare {} type parameter(s), got {}",
+                        m.line,
+                        m.type_name,
+                        info.type_params.len(),
+                        m.impl_type_params
+                    ));
+                }
+                TypeKey::Enum(eid)
+            } else {
+                return Err(format!(
+                    "{}: cannot write an impl block for '{}': impl blocks are only for \
+                     structs and enums",
+                    m.line, m.type_name
+                ));
+            };
+            if self
+                .methods
+                .insert((key, m.name.clone()), (m.func, m.has_self))
+                .is_some()
+            {
+                return Err(format!(
+                    "{}: duplicate method '{}' on '{}'",
+                    m.line, m.name, m.type_name
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn lookup_method(&self, recv: &Type, name: &str) -> Option<(u32, bool)> {
+        let key = match recv {
+            Type::Struct(id, _) => TypeKey::Struct(*id),
+            Type::Enum(id, _) => TypeKey::Enum(*id),
+            _ => return None,
+        };
+        self.methods.get(&(key, name.to_string())).copied()
+    }
+
     fn collect_funcs(&mut self, program: &Program) -> CResult<()> {
         for f in &program.funcs {
             if self.func_ids.contains_key(&f.name) {
+                // Duplicate methods are caught (with a better message) in
+                // `collect_methods`; this covers plain functions.
                 return Err(format!("{}: duplicate function '{}'", f.line, f.name));
             }
             self.check_type_params(&f.type_params, f.line)?;
@@ -1032,6 +1129,12 @@ impl Checker {
                     return Err(format!(
                         "{line}: builtin '{name}' can only be called, not used as a value"
                     ));
+                } else if name == "self" {
+                    return Err(format!(
+                        "{line}: 'self' is only available inside impl-block methods"
+                    ));
+                } else if let Some(hint) = retired_hint(&name) {
+                    return Err(format!("{line}: '{name}' is now a method: write {hint}"));
                 } else {
                     return Err(format!("{line}: unknown variable '{name}'"));
                 }
@@ -1227,32 +1330,70 @@ impl Checker {
                 e.ty = ty;
             }
             ExprKind::Call { callee, args, direct, inst } => {
-                // `Enum.Variant(value)`: construction of a wrapping variant.
-                // Values shadow enum names, so this fires only when the base
-                // name resolves to no local, capture, or function.
-                let variant_target = match &callee.kind {
-                    ExprKind::Field { obj, name: vname, .. } => match &obj.kind {
+                // `Enum.Variant(value)` / `Type.assoc(...)`: the base name
+                // resolves in the type namespace. Values shadow type names,
+                // so this fires only when the base name resolves to no
+                // local, capture, or function.
+                let type_target = match &callee.kind {
+                    ExprKind::Field { obj, name: mname, .. } => match &obj.kind {
                         ExprKind::Var { name: ename, .. }
                             if self.resolve_var(ename).is_none()
                                 && !self.func_ids.contains_key(ename)
-                                && self.enum_ids.contains_key(ename) =>
+                                && (self.enum_ids.contains_key(ename)
+                                    || self.struct_ids.contains_key(ename)) =>
                         {
-                            Some((self.enum_ids[ename], ename.clone(), vname.clone()))
+                            Some((ename.clone(), mname.clone()))
                         }
                         _ => None,
                     },
                     _ => None,
                 };
-                if let Some((eid, ename, vname)) = variant_target {
-                    let args = std::mem::take(args);
-                    return self.check_variant_lit(
-                        e,
-                        eid,
-                        ename,
-                        vname,
-                        VariantCtor::Call(args),
-                        expected,
-                    );
+                if let Some((tname, mname)) = type_target {
+                    if let Some(&eid) = self.enum_ids.get(&tname) {
+                        // Variants take priority (and cannot collide with
+                        // methods, checker-enforced).
+                        if self.enums[eid as usize].variants.iter().any(|(n, _)| n == &mname) {
+                            let args = std::mem::take(args);
+                            return self.check_variant_lit(
+                                e,
+                                eid,
+                                tname,
+                                mname,
+                                VariantCtor::Call(args),
+                                expected,
+                            );
+                        }
+                    }
+                    let key = match self.struct_ids.get(&tname) {
+                        Some(&sid) => TypeKey::Struct(sid),
+                        None => TypeKey::Enum(self.enum_ids[&tname]),
+                    };
+                    let Some(&(fid, has_self)) = self.methods.get(&(key, mname.clone()))
+                    else {
+                        return Err(match key {
+                            TypeKey::Enum(_) => format!(
+                                "{line}: enum '{tname}' has no variant or associated \
+                                 function '{mname}'"
+                            ),
+                            TypeKey::Struct(_) => format!(
+                                "{line}: struct '{tname}' has no associated function \
+                                 '{mname}'"
+                            ),
+                        });
+                    };
+                    if has_self {
+                        return Err(format!(
+                            "{line}: '{mname}' is a method; call it as 'value.{mname}(...)'"
+                        ));
+                    }
+                    let what = format!("{tname}.{mname}");
+                    let (fty, targs, rty) =
+                        self.check_call_sig(&what, fid, args, expected, line, 0)?;
+                    *direct = Some(fid);
+                    *inst = targs;
+                    callee.ty = fty;
+                    e.ty = rty;
+                    return Ok(());
                 }
                 // A call to a bare name may be a direct call or a builtin.
                 if let ExprKind::Var { name, res } = &mut callee.kind {
@@ -1261,25 +1402,12 @@ impl Checker {
                         *res = Some(r);
                         callee.ty = ty;
                     } else if let Some(&fid) = self.func_ids.get(&name) {
+                        let (fty, targs, rty) =
+                            self.check_call_sig(&name, fid, args, expected, line, 0)?;
                         *direct = Some(fid);
-                        let (tparams, params, ret) = {
-                            let sig = &self.funcs[fid as usize];
-                            (sig.type_params.clone(), sig.params.clone(), sig.ret.clone())
-                        };
-                        if tparams.is_empty() {
-                            callee.ty = Type::Fn(params.clone(), Box::new(ret.clone()));
-                            self.check_args(&name, &params, args, line)?;
-                            e.ty = ret;
-                        } else {
-                            let targs = self
-                                .infer_call(&name, &tparams, &params, args, expected, &ret, line)?;
-                            callee.ty = Type::Fn(
-                                params.iter().map(|p| p.subst(&targs)).collect(),
-                                Box::new(ret.subst(&targs)),
-                            );
-                            e.ty = ret.subst(&targs);
-                            *inst = targs;
-                        }
+                        *inst = targs;
+                        callee.ty = fty;
+                        e.ty = rty;
                         return Ok(());
                     } else if let Some((_, b)) = BUILTINS.iter().find(|(n, _)| *n == name) {
                         let b = *b;
@@ -1287,16 +1415,62 @@ impl Checker {
                         let ty = self.check_builtin(b, &mut e.kind, args, line)?;
                         e.ty = ty;
                         return Ok(());
+                    } else if let Some(hint) = retired_hint(&name) {
+                        return Err(format!(
+                            "{line}: '{name}' is now a method: write {hint}"
+                        ));
                     } else {
                         return Err(format!("{line}: unknown function '{name}'"));
                     }
+                } else if let ExprKind::Field { obj, name: mname, .. } = &mut callee.kind {
+                    // `expr.name(args)`: a method call, a builtin method, or
+                    // a call through a function-valued field. The receiver
+                    // is checked exactly once, here.
+                    self.check_expr(obj, None)?;
+                    let recv_ty = obj.ty.clone();
+                    if let Some((fid, has_self)) = self.lookup_method(&recv_ty, mname) {
+                        if !has_self {
+                            return Err(format!(
+                                "{line}: '{mname}' is an associated function; call it \
+                                 as '{}.{mname}(...)'",
+                                self.type_base_name(&recv_ty)
+                            ));
+                        }
+                        let mname = mname.clone();
+                        let recv =
+                            std::mem::replace(&mut **obj, Expr::new(ExprKind::Bool(false), line));
+                        args.insert(0, recv);
+                        let (fty, targs, rty) =
+                            self.check_call_sig(&mname, fid, args, expected, line, 1)?;
+                        // The callee expression is dead for a direct call;
+                        // leave a resolution-free placeholder.
+                        callee.kind = ExprKind::Var { name: mname, res: None };
+                        callee.ty = fty;
+                        *direct = Some(fid);
+                        *inst = targs;
+                        e.ty = rty;
+                        return Ok(());
+                    }
+                    if let Some(b) = builtin_method(&recv_ty, mname, self.option_enum) {
+                        let recv =
+                            std::mem::replace(&mut **obj, Expr::new(ExprKind::Bool(false), line));
+                        let mut margs = std::mem::take(args);
+                        margs.insert(0, recv);
+                        let ty = self.check_builtin_method(b, &mut e.kind, margs, line)?;
+                        e.ty = ty;
+                        return Ok(());
+                    }
+                    // Fall through: an ordinary field access (the field may
+                    // hold a function value). Reports no-such-method for
+                    // everything else.
+                    self.check_field_after_obj(callee)?;
                 } else {
                     self.check_expr(callee, None)?;
                 }
                 // Indirect call through a function value.
                 match callee.ty.clone() {
                     Type::Fn(params, ret) => {
-                        self.check_args("function value", &params, args, line)?;
+                        self.check_args("function value", &params, args, line, 0)?;
                         e.ty = *ret;
                     }
                     other => {
@@ -1309,6 +1483,9 @@ impl Checker {
                 }
             }
             ExprKind::Builtin(..) => unreachable!("builtins are created by the checker"),
+            ExprKind::BoundMethod { .. } => {
+                unreachable!("bound methods are created by the checker")
+            }
             ExprKind::VariantLit { .. } => {
                 unreachable!("variant literals are created by the checker")
             }
@@ -1367,56 +1544,91 @@ impl Checker {
                 }
                 e.ty = ty;
             }
-            ExprKind::Field { obj, name, index } => {
-                // `Enum.Variant`: a bare variant, unless a value shadows the
-                // enum name (then it is an ordinary field access).
-                let variant_target = match &obj.kind {
+            ExprKind::Field { obj, name, .. } => {
+                // `Enum.Variant` (a bare variant) or a type-name diagnostic,
+                // unless a value shadows the type name (then it is an
+                // ordinary field access).
+                let type_target = match &obj.kind {
                     ExprKind::Var { name: ename, .. }
                         if self.resolve_var(ename).is_none()
                             && !self.func_ids.contains_key(ename)
-                            && self.enum_ids.contains_key(ename) =>
+                            && (self.enum_ids.contains_key(ename)
+                                || self.struct_ids.contains_key(ename)) =>
                     {
-                        Some((self.enum_ids[ename], ename.clone(), name.clone()))
+                        Some(ename.clone())
                     }
                     _ => None,
                 };
-                if let Some((eid, ename, vname)) = variant_target {
-                    return self.check_variant_lit(
-                        e,
-                        eid,
-                        ename,
-                        vname,
-                        VariantCtor::Bare,
-                        expected,
-                    );
-                }
-                self.check_expr(obj, None)?;
-                match obj.ty.clone() {
-                    Type::Struct(sid, targs) => {
-                        let info = &self.structs[sid as usize];
-                        match info.fields.iter().position(|(n, _)| n == name) {
-                            Some(i) => {
-                                *index = i as u32;
-                                // Field types live in the struct's own
-                                // parameter space; map into the caller's.
-                                e.ty = info.fields[i].1.subst(&targs);
-                            }
-                            None => {
-                                return Err(format!(
-                                    "{}: struct '{}' has no field '{}'",
-                                    line, info.name, name
-                                ))
-                            }
+                if let Some(tname) = type_target {
+                    if let Some(&eid) = self.enum_ids.get(&tname) {
+                        if self.enums[eid as usize].variants.iter().any(|(n, _)| n == name) {
+                            let vname = name.clone();
+                            return self.check_variant_lit(
+                                e,
+                                eid,
+                                tname,
+                                vname,
+                                VariantCtor::Bare,
+                                expected,
+                            );
                         }
                     }
-                    _ => {
-                        return Err(format!(
-                            "{}: field access on non-struct type {}",
-                            line,
-                            self.show(&obj.ty)
-                        ))
+                    let key = match self.struct_ids.get(&tname) {
+                        Some(&sid) => TypeKey::Struct(sid),
+                        None => TypeKey::Enum(self.enum_ids[&tname]),
+                    };
+                    // A type-qualified name in value position: methods and
+                    // associated functions are call-only.
+                    return Err(if self.methods.contains_key(&(key, name.clone())) {
+                        format!(
+                            "{line}: '{tname}.{name}' can only be called, not used as a value"
+                        )
+                    } else if matches!(key, TypeKey::Enum(_)) {
+                        format!("{line}: enum '{tname}' has no variant '{name}'")
+                    } else {
+                        format!("{line}: struct '{tname}' has no associated function '{name}'")
+                    });
+                }
+                self.check_expr(obj, None)?;
+                // A method named in value position becomes a *bound method*:
+                // a closure capturing the receiver. Field names cannot
+                // collide with method names (checker-enforced), so order is
+                // immaterial; fields are tried first as the common case.
+                if let Type::Struct(sid, _) = &obj.ty {
+                    let has_field = self.structs[*sid as usize]
+                        .fields
+                        .iter()
+                        .any(|(n, _)| n == name);
+                    if !has_field {
+                        if let Some((fid, has_self)) = self.lookup_method(&obj.ty, name) {
+                            if !has_self {
+                                return Err(format!(
+                                    "{line}: '{}.{name}' can only be called, not used as \
+                                     a value",
+                                    self.type_base_name(&obj.ty)
+                                ));
+                            }
+                            return self.check_bound_method(e, fid, line);
+                        }
+                    }
+                } else if matches!(obj.ty, Type::Enum(..)) {
+                    if let Some((fid, has_self)) = self.lookup_method(&obj.ty, name) {
+                        if !has_self {
+                            return Err(format!(
+                                "{line}: '{}.{name}' can only be called, not used as a value",
+                                self.type_base_name(&obj.ty)
+                            ));
+                        }
+                        return self.check_bound_method(e, fid, line);
                     }
                 }
+                if builtin_method(&obj.ty, name, self.option_enum).is_some() {
+                    return Err(format!(
+                        "{line}: builtin method '{name}' can only be called, not used as \
+                         a value"
+                    ));
+                }
+                self.check_field_after_obj(e)?;
             }
             ExprKind::Index(obj, idx) => {
                 self.check_expr(obj, None)?;
@@ -1732,12 +1944,193 @@ impl Checker {
         Ok(())
     }
 
+    /// The bare declaration name of a struct or enum type, for diagnostics.
+    fn type_base_name(&self, t: &Type) -> &str {
+        match t {
+            Type::Struct(id, _) => &self.structs[*id as usize].name,
+            Type::Enum(id, _) => &self.enums[*id as usize].name,
+            _ => unreachable!("only nominal types have methods"),
+        }
+    }
+
+    /// Resolve `e` (a `Field` whose object is already checked) as a plain
+    /// struct field access, or report that no field or method exists.
+    fn check_field_after_obj(&mut self, e: &mut Expr) -> CResult<()> {
+        let line = e.line;
+        let ExprKind::Field { obj, name, index } = &mut e.kind else {
+            unreachable!("caller matched a field access")
+        };
+        match obj.ty.clone() {
+            Type::Struct(sid, targs) => {
+                let info = &self.structs[sid as usize];
+                match info.fields.iter().position(|(n, _)| n == name) {
+                    Some(i) => {
+                        *index = i as u32;
+                        // Field types live in the struct's own parameter
+                        // space; map into the caller's.
+                        e.ty = info.fields[i].1.subst(&targs);
+                    }
+                    None => {
+                        return Err(format!(
+                            "{}: struct '{}' has no field or method '{}'",
+                            line, info.name, name
+                        ))
+                    }
+                }
+            }
+            Type::Enum(eid, _) => {
+                return Err(format!(
+                    "{}: enum '{}' has no method '{}'",
+                    line, self.enums[eid as usize].name, name
+                ))
+            }
+            other => {
+                return Err(format!(
+                    "{}: type {} has no method '{}'",
+                    line,
+                    self.show(&other),
+                    name
+                ))
+            }
+        }
+        Ok(())
+    }
+
+    /// Rewrite `e` (a `Field` naming a method, object already checked) into
+    /// a bound method: a first-class closure capturing the receiver. Every
+    /// type parameter must be determined by the receiver type, so a method
+    /// with its own type parameters cannot be bound.
+    fn check_bound_method(&mut self, e: &mut Expr, fid: u32, line: u32) -> CResult<()> {
+        let ExprKind::Field { obj, name, .. } = &mut e.kind else {
+            unreachable!("caller matched a field access")
+        };
+        let (tparams, params, ret) = {
+            let sig = &self.funcs[fid as usize];
+            (sig.type_params.clone(), sig.params.clone(), sig.ret.clone())
+        };
+        let mut solved: Vec<Option<Type>> = vec![None; tparams.len()];
+        unify(&params[0], &obj.ty, &mut solved)
+            .expect("receiver type matches the method's impl type by construction");
+        if let Some(i) = solved.iter().position(Option::is_none) {
+            return Err(format!(
+                "{}: cannot infer type parameter '{}' of method '{}'; a method with its \
+                 own type parameters can only be called, not bound as a value",
+                line, tparams[i], name
+            ));
+        }
+        let targs: Vec<Type> = solved.into_iter().map(Option::unwrap).collect();
+        let bound_params: Vec<Type> = params[1..].iter().map(|t| t.subst(&targs)).collect();
+        let bound_ret = ret.subst(&targs);
+        let obj = std::mem::replace(&mut **obj, Expr::new(ExprKind::Bool(false), line));
+        e.ty = Type::Fn(bound_params, Box::new(bound_ret));
+        e.kind = ExprKind::BoundMethod { obj: Box::new(obj), fid, inst: targs };
+        Ok(())
+    }
+
+    /// Check a builtin method call. `args[0]` is the receiver, already
+    /// checked and already matched to `b` by `builtin_method`; the remaining
+    /// arguments are checked here. Rewrites `kind` into `Builtin`.
+    fn check_builtin_method(
+        &mut self,
+        b: Builtin,
+        kind: &mut ExprKind,
+        mut args: Vec<Expr>,
+        line: u32,
+    ) -> CResult<Type> {
+        let surface = match b {
+            Builtin::Len => "len",
+            Builtin::Push => "push",
+            Builtin::Pop => "pop",
+            Builtin::Itos | Builtin::Ftos | Builtin::Btos => "to_string",
+            Builtin::Itof | Builtin::Stof => "to_float",
+            Builtin::Stoi => "to_int",
+            Builtin::Stob => "to_bytes",
+            Builtin::Unwrap => "unwrap",
+            _ => unreachable!("not a builtin method"),
+        };
+        let argc = |n: usize| -> CResult<()> {
+            if args.len() - 1 != n {
+                Err(format!(
+                    "{line}: method '{surface}' expects {n} argument(s), got {}",
+                    args.len() - 1
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        let ty = match b {
+            Builtin::Len => {
+                argc(0)?;
+                INT
+            }
+            Builtin::Push => {
+                argc(1)?;
+                let elem = match args[0].ty.clone() {
+                    Type::Array(elem) => *elem,
+                    _ => unreachable!("dispatched on an array receiver"),
+                };
+                self.check_expr(&mut args[1], Some(&elem))?;
+                self.require_assignable(&elem, &args[1].ty, line)?;
+                Type::Unit
+            }
+            Builtin::Pop => {
+                argc(0)?;
+                match args[0].ty.clone() {
+                    Type::Array(elem) => *elem,
+                    _ => unreachable!("dispatched on an array receiver"),
+                }
+            }
+            Builtin::Itos | Builtin::Ftos => {
+                argc(0)?;
+                Type::Str
+            }
+            Builtin::Itof => {
+                argc(0)?;
+                Type::Float
+            }
+            Builtin::Stoi => {
+                argc(0)?;
+                INT
+            }
+            Builtin::Stof => {
+                argc(0)?;
+                Type::Float
+            }
+            Builtin::Stob => {
+                argc(0)?;
+                Type::Array(Box::new(Type::Int(IntKind::U8)))
+            }
+            Builtin::Btos => {
+                argc(0)?;
+                if args[0].ty != Type::Array(Box::new(Type::Int(IntKind::U8))) {
+                    return Err(format!(
+                        "{}: to_string() needs a [u8], found {}",
+                        line,
+                        self.show(&args[0].ty)
+                    ));
+                }
+                Type::Str
+            }
+            Builtin::Unwrap => {
+                argc(0)?;
+                match &args[0].ty {
+                    Type::Enum(_, targs) => targs[0].clone(),
+                    _ => unreachable!("dispatched on an Option receiver"),
+                }
+            }
+            _ => unreachable!("not a builtin method"),
+        };
+        *kind = ExprKind::Builtin(b, args);
+        Ok(ty)
+    }
+
     fn check_args(
         &mut self,
         what: &str,
         params: &[Type],
         args: &mut [Expr],
         line: u32,
+        checked_prefix: usize,
     ) -> CResult<()> {
         if params.len() != args.len() {
             return Err(format!(
@@ -1748,11 +2141,58 @@ impl Checker {
                 args.len()
             ));
         }
-        for (arg, pty) in args.iter_mut().zip(params) {
-            self.check_expr(arg, Some(pty))?;
+        for (i, (arg, pty)) in args.iter_mut().zip(params).enumerate() {
+            // The first `checked_prefix` arguments (a method receiver) were
+            // already checked; re-checking would re-run checker rewrites.
+            if i >= checked_prefix {
+                self.check_expr(arg, Some(pty))?;
+            }
             self.require_assignable(pty, &arg.ty, arg.line)?;
         }
         Ok(())
+    }
+
+    /// Finish a call to the top-level function `fid`: check the (full)
+    /// argument list against its signature, inferring type arguments when it
+    /// is generic. `skip` hides a method receiver from arity diagnostics and
+    /// marks it as already checked. Returns the callee's concrete function
+    /// type, the inferred type arguments, and the result type.
+    fn check_call_sig(
+        &mut self,
+        what: &str,
+        fid: u32,
+        args: &mut [Expr],
+        expected: Option<&Type>,
+        line: u32,
+        skip: usize,
+    ) -> CResult<(Type, Vec<Type>, Type)> {
+        let (tparams, params, ret) = {
+            let sig = &self.funcs[fid as usize];
+            (sig.type_params.clone(), sig.params.clone(), sig.ret.clone())
+        };
+        if params.len() != args.len() {
+            return Err(format!(
+                "{}: '{}' expects {} argument(s), got {}",
+                line,
+                what,
+                params.len() - skip,
+                args.len() - skip
+            ));
+        }
+        if tparams.is_empty() {
+            self.check_args(what, &params, args, line, skip)?;
+            let rty = ret.clone();
+            Ok((Type::Fn(params, Box::new(ret)), Vec::new(), rty))
+        } else {
+            let targs =
+                self.infer_call(what, &tparams, &params, args, expected, &ret, line, skip)?;
+            let fty = Type::Fn(
+                params.iter().map(|p| p.subst(&targs)).collect(),
+                Box::new(ret.subst(&targs)),
+            );
+            let rty = ret.subst(&targs);
+            Ok((fty, targs, rty))
+        }
     }
 
     /// Check a call to a generic function, inferring its type arguments.
@@ -1760,6 +2200,7 @@ impl Checker {
     /// that only occur in the return type can still be solved; arguments are
     /// then processed left to right, and each one either checks against the
     /// already-solved expectation or contributes new bindings.
+    #[allow(clippy::too_many_arguments)]
     fn infer_call(
         &mut self,
         what: &str,
@@ -1769,6 +2210,7 @@ impl Checker {
         expected: Option<&Type>,
         ret: &Type,
         line: u32,
+        checked_prefix: usize,
     ) -> CResult<Vec<Type>> {
         if params.len() != args.len() {
             return Err(format!(
@@ -1788,13 +2230,17 @@ impl Checker {
                 solved = trial;
             }
         }
-        for (arg, pty) in args.iter_mut().zip(params) {
+        for (i, (arg, pty)) in args.iter_mut().zip(params).enumerate() {
             let want = subst_partial(pty, &solved);
             if !want.has_param() {
-                self.check_expr(arg, Some(&want))?;
+                if i >= checked_prefix {
+                    self.check_expr(arg, Some(&want))?;
+                }
                 self.require_assignable(&want, &arg.ty, arg.line)?;
             } else {
-                self.check_expr(arg, None)?;
+                if i >= checked_prefix {
+                    self.check_expr(arg, None)?;
+                }
                 if unify(pty, &arg.ty, &mut solved).is_err() {
                     return Err(format!(
                         "{}: type mismatch: expected {}, found {}",
@@ -1815,6 +2261,9 @@ impl Checker {
         Ok(solved.into_iter().map(Option::unwrap).collect())
     }
 
+    /// Check a call to one of the remaining free-function builtins
+    /// (`println`, `print`, `assert`, `gc_collect`); everything with a
+    /// receiver is a builtin *method* (`check_builtin_method`).
     fn check_builtin(
         &mut self,
         b: Builtin,
@@ -1845,97 +2294,6 @@ impl Checker {
                 }
                 Type::Unit
             }
-            Builtin::Len => {
-                argc(1)?;
-                self.check_expr(&mut args[0], None)?;
-                match args[0].ty {
-                    Type::Str | Type::Array(_) => {}
-                    _ => {
-                        return Err(format!(
-                            "{}: len() needs a string or array, found {}",
-                            line,
-                            self.show(&args[0].ty)
-                        ))
-                    }
-                }
-                INT
-            }
-            Builtin::Push => {
-                argc(2)?;
-                self.check_expr(&mut args[0], None)?;
-                let elem = match args[0].ty.clone() {
-                    Type::Array(elem) => *elem,
-                    other => {
-                        return Err(format!(
-                            "{}: push() needs an array, found {}",
-                            line,
-                            self.show(&other)
-                        ))
-                    }
-                };
-                let (head, tail) = args.split_at_mut(1);
-                let _ = head;
-                self.check_expr(&mut tail[0], Some(&elem))?;
-                self.require_assignable(&elem, &tail[0].ty, line)?;
-                Type::Unit
-            }
-            Builtin::Pop => {
-                argc(1)?;
-                self.check_expr(&mut args[0], None)?;
-                match args[0].ty.clone() {
-                    Type::Array(elem) => *elem,
-                    other => {
-                        return Err(format!(
-                            "{}: pop() needs an array, found {}",
-                            line,
-                            self.show(&other)
-                        ))
-                    }
-                }
-            }
-            Builtin::Itos | Builtin::Itof => {
-                argc(1)?;
-                self.check_expr(&mut args[0], Some(&INT))?;
-                if args[0].ty.int_kind().is_none() {
-                    return Err(format!(
-                        "{}: type mismatch: expected an integer, found {}",
-                        line,
-                        self.show(&args[0].ty)
-                    ));
-                }
-                if b == Builtin::Itos { Type::Str } else { Type::Float }
-            }
-            Builtin::Ftos | Builtin::Ftoi => {
-                argc(1)?;
-                self.check_expr(&mut args[0], Some(&Type::Float))?;
-                self.require_assignable(&Type::Float, &args[0].ty, line)?;
-                if b == Builtin::Ftos { Type::Str } else { INT }
-            }
-            Builtin::Stoi | Builtin::Stof => {
-                argc(1)?;
-                self.check_expr(&mut args[0], Some(&Type::Str))?;
-                self.require_assignable(&Type::Str, &args[0].ty, line)?;
-                if b == Builtin::Stoi { INT } else { Type::Float }
-            }
-            Builtin::Stob => {
-                argc(1)?;
-                self.check_expr(&mut args[0], Some(&Type::Str))?;
-                self.require_assignable(&Type::Str, &args[0].ty, line)?;
-                Type::Array(Box::new(Type::Int(IntKind::U8)))
-            }
-            Builtin::Btos => {
-                argc(1)?;
-                let want = Type::Array(Box::new(Type::Int(IntKind::U8)));
-                self.check_expr(&mut args[0], Some(&want))?;
-                if args[0].ty != want {
-                    return Err(format!(
-                        "{}: btos() needs a [u8], found {}",
-                        line,
-                        self.show(&args[0].ty)
-                    ));
-                }
-                Type::Str
-            }
             Builtin::Assert => {
                 argc(1)?;
                 self.check_expr(&mut args[0], Some(&Type::Bool))?;
@@ -1946,24 +2304,32 @@ impl Checker {
                 argc(0)?;
                 Type::Unit
             }
-            Builtin::Unwrap => {
-                argc(1)?;
-                self.check_expr(&mut args[0], None)?;
-                match (&args[0].ty, self.option_enum) {
-                    (Type::Enum(eid, targs), Some(oid)) if *eid == oid => targs[0].clone(),
-                    _ => {
-                        return Err(format!(
-                            "{}: unwrap() needs an Option, found {}",
-                            line,
-                            self.show(&args[0].ty)
-                        ))
-                    }
-                }
-            }
+            _ => unreachable!("receiver builtins are resolved as methods"),
         };
         *kind = ExprKind::Builtin(b, args);
         Ok(ty)
     }
+}
+
+/// Which builtin (if any) the method name `name` denotes on a receiver of
+/// type `recv`. User-defined methods are looked up first by the caller, so
+/// e.g. a user `unwrap` on a shadowing `Option` wins.
+fn builtin_method(recv: &Type, name: &str, option_enum: Option<u32>) -> Option<Builtin> {
+    Some(match (recv, name) {
+        (Type::Array(_), "len") => Builtin::Len,
+        (Type::Array(_), "push") => Builtin::Push,
+        (Type::Array(_), "pop") => Builtin::Pop,
+        (Type::Array(_), "to_string") => Builtin::Btos,
+        (Type::Str, "len") => Builtin::Len,
+        (Type::Str, "to_int") => Builtin::Stoi,
+        (Type::Str, "to_float") => Builtin::Stof,
+        (Type::Str, "to_bytes") => Builtin::Stob,
+        (Type::Int(_), "to_string") => Builtin::Itos,
+        (Type::Int(_), "to_float") => Builtin::Itof,
+        (Type::Float, "to_string") => Builtin::Ftos,
+        (Type::Enum(eid, _), "unwrap") if Some(*eid) == option_enum => Builtin::Unwrap,
+        _ => return None,
+    })
 }
 
 /// Conservative "all paths return" analysis.
@@ -2100,7 +2466,7 @@ mod tests {
         assert!(err_in_main("foo();").contains("unknown function 'foo'"));
         assert!(err_in_main("let p = P { x: 1 };").contains("unknown struct 'P'"));
         assert!(err("struct P { x: int } fn main() { let p = P { x: 1 }; println(p.y); }")
-            .contains("no field 'y'"));
+            .contains("no field or method 'y'"));
         assert!(err("struct P { x: int } fn main() { let p = P { y: 1 }; }")
             .contains("no field 'y'"));
     }
@@ -2193,14 +2559,26 @@ mod tests {
         assert!(err("struct P { x: int } fn main() { println(P { x: 1 }); }")
             .contains("cannot print a value of type P"));
         assert!(err_in_main("println(1, 2);").contains("expects 1 argument(s)"));
-        assert!(err_in_main("let x = len(1);").contains("len() needs a string or array"));
-        assert!(err_in_main("push(1, 2);").contains("push() needs an array"));
-        assert!(err_in_main("let x = pop(1);").contains("pop() needs an array"));
-        assert!(err_in_main("let xs = [1]; push(xs, \"s\");").contains("type mismatch"));
-        assert!(err_in_main("let x = itos(1.5);").contains("type mismatch"));
-        assert!(err_in_main("let x = ftos(1);").contains("type mismatch"));
+        assert!(err_in_main("let x = 1.len();").contains("type int has no method 'len'"));
+        assert!(err_in_main("1.push(2);").contains("type int has no method 'push'"));
+        assert!(err_in_main("let x = 1.pop();").contains("type int has no method 'pop'"));
+        assert!(err_in_main("let xs = [1]; xs.push(\"s\");").contains("type mismatch"));
+        assert!(err_in_main("let x = true.to_string();")
+            .contains("type bool has no method 'to_string'"));
+        assert!(err_in_main("let xs = [1]; xs.push(1, 2);")
+            .contains("method 'push' expects 1 argument(s), got 2"));
+        assert!(err_in_main("let xs = [1]; let n = xs.len(1);")
+            .contains("method 'len' expects 0 argument(s), got 1"));
         assert!(err_in_main("assert(1);").contains("type mismatch"));
         assert!(err_in_main("let p = println;").contains("can only be called"));
+        assert!(err_in_main("let xs = [1]; let s = xs.len;")
+            .contains("builtin method 'len' can only be called"));
+        // Retired free-function forms point at the method spelling.
+        assert!(err_in_main("let xs = [1]; let n = len(xs);")
+            .contains("'len' is now a method: write x.len()"));
+        assert!(err_in_main("let s = itos(1);").contains("write i.to_string()"));
+        assert!(err_in_main("let i = ftoi(1.5);").contains("write f as int"));
+        assert!(err_in_main("let f = len;").contains("'len' is now a method"));
     }
 
     #[test]
@@ -2208,8 +2586,9 @@ mod tests {
         assert!(err_in_main("let x = 1; println(x[0]);").contains("cannot index a value of type"));
         assert!(err_in_main("let xs = [1]; println(xs[true]);")
             .contains("array index must be int"));
-        assert!(err_in_main("let x = 1; println(x.y);").contains("field access on non-struct"));
-        assert!(err_in_main("let s = \"x\"; println(s.len);").contains("field access on non-struct"));
+        assert!(err_in_main("let x = 1; println(x.y);").contains("type int has no method 'y'"));
+        assert!(err_in_main("let s = \"x\"; println(s.len);")
+            .contains("builtin method 'len' can only be called"));
     }
 
     #[test]
@@ -2408,18 +2787,24 @@ mod tests {
     fn stob_btos_rules() {
         let (_, checked) = check_src(
             r#"fn main() {
-                let bs = stob("abc");
-                let s = btos(bs);
+                let bs = "abc".to_bytes();
+                let s = bs.to_string();
             }"#,
         )
         .unwrap();
         assert_eq!(checked.func_locals[0][0], Type::Array(Box::new(Type::Int(IntKind::U8))));
         assert_eq!(checked.func_locals[0][1], Type::Str);
-        assert!(err_in_main("let x = stob(1);").contains("type mismatch"));
-        assert!(err_in_main("let x = btos(\"s\");").contains("btos() needs a [u8]"));
-        assert!(err_in_main("let is = [1]; let x = btos(is);").contains("btos() needs a [u8]"));
-        // The context type flows into a literal argument: this is a [u8].
-        check_src("fn main() { let s = btos([104, 105]); }").unwrap();
+        assert!(err_in_main("let x = 1.to_bytes();")
+            .contains("type int has no method 'to_bytes'"));
+        assert!(err_in_main("let x = \"s\".to_string();")
+            .contains("type string has no method 'to_string'"));
+        assert!(err_in_main("let is = [1]; let x = is.to_string();")
+            .contains("to_string() needs a [u8]"));
+        // A receiver is checked without context, so a literal receiver needs
+        // an annotation to become a [u8].
+        assert!(err_in_main("let s = [104, 105].to_string();")
+            .contains("to_string() needs a [u8]"));
+        check_src("fn main() { let bs: [u8] = [104, 105]; let s = bs.to_string(); }").unwrap();
     }
 
     #[test]
@@ -2436,23 +2821,75 @@ mod tests {
     fn stoi_stof_rules() {
         check_src(
             r#"fn main() {
-                let i = stoi("42");
-                let f = stof("1.5");
+                let i = "42".to_int();
+                let f = "1.5".to_float();
                 let sum = i + 1;
                 let prod = f * 2.0;
             }"#,
         )
         .unwrap();
-        assert!(err_in_main("let x = stoi(1);").contains("type mismatch"));
-        assert!(err_in_main("let x = stof(true);").contains("type mismatch"));
-        assert!(err_in_main("let x = stoi(\"1\", \"2\");").contains("expects 1 argument(s)"));
+        assert!(err_in_main("let x = 1.to_int();").contains("type int has no method 'to_int'"));
+        assert!(err_in_main("let x = true.to_float();")
+            .contains("type bool has no method 'to_float'"));
+        assert!(err_in_main("let x = \"1\".to_int(\"2\");")
+            .contains("method 'to_int' expects 0 argument(s), got 1"));
+    }
+
+    #[test]
+    fn method_resolution_and_binding() {
+        let (program, _) = check_src(
+            r#"struct P { x: int }
+               impl P {
+                   fn get(self): int { self.x }
+                   fn mk(v: int): P { P { x: v } }
+               }
+               struct Pair<T> { a: T, b: T }
+               impl Pair<T> { fn first(self): T { self.a } }
+               fn main() {
+                   let p = P.mk(1);
+                   let a = p.get();
+                   let f = p.get;
+                   let q = Pair { a: 1, b: 2 };
+                   let g = q.first;
+               }"#,
+        )
+        .unwrap();
+        // funcs: P.get = 0, P.mk = 1, Pair.first = 2, main = 3.
+        let stmts = &program.funcs[3].body.stmts;
+        // An associated call is a plain direct call.
+        let Stmt::Let { init, .. } = &stmts[0] else { panic!() };
+        let ExprKind::Call { direct, args, .. } = &init.kind else { panic!() };
+        assert_eq!((*direct, args.len()), (Some(1), 1));
+        // A method call is a direct call with the receiver prepended.
+        let Stmt::Let { init, .. } = &stmts[1] else { panic!() };
+        let ExprKind::Call { direct, args, .. } = &init.kind else { panic!() };
+        assert_eq!((*direct, args.len()), (Some(0), 1));
+        assert_eq!(init.ty, INT);
+        // `p.get` binds the receiver: a zero-argument fn value.
+        let Stmt::Let { init, .. } = &stmts[2] else { panic!() };
+        assert!(matches!(&init.kind, ExprKind::BoundMethod { fid: 0, .. }));
+        assert_eq!(init.ty, Type::Fn(vec![], Box::new(INT)));
+        // Binding a generic method records the receiver's type arguments.
+        let Stmt::Let { init, .. } = &stmts[4] else { panic!() };
+        let ExprKind::BoundMethod { inst, .. } = &init.kind else { panic!() };
+        assert_eq!(inst, &vec![INT]);
+        assert_eq!(init.ty, Type::Fn(vec![], Box::new(INT)));
     }
 
     #[test]
     fn user_names_shadow_builtins() {
-        // A user function named like a builtin wins.
-        check_src("fn len(x: int): int { return x; } fn main() { assert(len(3) == 3); }")
-            .unwrap();
+        // A user *method* named like a builtin method wins on its own type
+        // (here: a user `unwrap` on a struct is unrelated to Option's).
+        check_src(
+            "struct W { v: int } impl W { fn unwrap(self): int { self.v } } \
+             fn main() { assert(W { v: 3 }.unwrap() == 3); }",
+        )
+        .unwrap();
+        // A user function named like a *free* builtin wins.
+        check_src(
+            "fn assert(x: int): int { return x; } fn main() { println(assert(3)); }",
+        )
+        .unwrap();
         // A local shadows a top-level function inside its scope.
         check_src("fn f(): int { return 1; } fn main() { let f = 2; assert(f == 2); }").unwrap();
     }
